@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Starter bot dependencies.
+  - package-ecosystem: pip
+    directory: /templates/starter-bot
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  # Docs site dependencies (VitePress).
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  # GitHub Actions in .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
