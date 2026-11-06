@@ -1,0 +1,16 @@
+# discord-py-skills — agent contract for newr
+
+- newr is the package manager for the discord-py-skills pack. Python 3.10+, stdlib only.
+- Always run newr with --json: stdout is exactly one JSON object
+  {ok, command, newr, data, warnings, error: {code, message, hint}|null}.
+  Logs go to stderr. Prompts are disabled; a command that needs input
+  fails with error.code "usage" and names the flag that replaces it.
+- Exit codes: 0 success; 1 usage error; 2 environment error
+  (Python < 3.10, missing or corrupt local source); 3 network error;
+  4 build error (newr build).
+- Install skills with: newr --json install --agent <name> all
+  (or a skill name instead of "all"). Never parse the human output.
+- Resolve "latest" from GET https://api.github.com/repos/drewdestar/discord-py-skills/releases/latest
+  (field tag_name). No releases exist before v0.5.0 ships; fall back to main.
+- Never invent a skill's contents. Load the real SKILL.md from disk
+  after installing; see skills/using-discord-py-skills/SKILL.md for routing.

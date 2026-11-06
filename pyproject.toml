@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discord-py-skills"
+version = "0.5.0"
+description = "Homebrew-style installer for the discord-py-skills agent skill pack"
+readme = "README.md"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+
+# The `newr` file is a single stdlib-only Python script (no .py
+# extension). setuptools installs it as a console script and creates
+# a `newr.exe` launcher for it on Windows. The skills themselves are
+# not shipped in this distribution: `newr install` fetches them from
+# the public repo (or uses a local clone), so a pip install stays tiny.
+[tool.setuptools]
+# This distribution ships no importable Python packages at all — only
+# the `newr` script. Say so explicitly, or setuptools' flat-layout
+# auto-discovery tries to package the repo's skills/, templates/ and
+# other directories and refuses to build.
+packages = []
+script-files = ["newr"]

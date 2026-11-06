@@ -8,8 +8,11 @@ Contributions are welcome. Keep them small, tested, and honest.
 2. Make one change per pull request: one skill fix, one script fix, or
    one template improvement.
 3. Run the tests before opening the pull request:
-   - `python -m pytest scripts/test_scripts.py -q`
-   - `python -m pytest templates/starter-bot -q`
+   - `python -m pytest tests/ -q` (the pack suite: skills, `newr`,
+     router, and the manifest check)
+   - `python -m pytest templates/starter-bot -q` (the starter bot)
+   - `cd website && npm run docs:build` (the docs site must build;
+     it regenerates the skill pages from `skills/`)
 4. Describe what changed and why in the pull request. Link the issue
    if one exists.
 
@@ -27,12 +30,16 @@ Contributions are welcome. Keep them small, tested, and honest.
   `description`, `license`, `compatibility`, `metadata`,
   `allowed-tools`). The `name` must equal the folder name and the
   description must stay under 1024 characters.
+- A skill body stays under 8,192 bytes and under 500 lines. Long
+  sections go in `references/` files, with a pointer (heading +
+  one-sentence summary + file link) left in the body. The body stays
+  complete and coherent; the detail lives in `references/`.
 - Script copies in `skills/<name>/scripts/` must stay byte-identical
   to `scripts/` at the repo root; `tests/test_newr.py` checks this.
 
 ## Rules for code
 
-- Python 3.11 or newer. Type hints on public functions.
+- Python 3.10 or newer. Type hints on public functions.
 - No blocking calls inside async code (`time.sleep`, `requests`,
   synchronous database drivers in commands).
 - All SQL parameterized. Never build SQL with f-strings.

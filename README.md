@@ -4,7 +4,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.4.0-5865F2?style=flat-square)](https://github.com/drewdestar/discord-py-skills)
+[![version](https://img.shields.io/badge/version-0.5.0-5865F2?style=flat-square)](https://github.com/drewdestar/discord-py-skills)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![discord.py](https://img.shields.io/badge/discord.py-2.x-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
 [![MIT license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -13,11 +13,12 @@
 
 ### Agent skills and a production starter kit for building Discord bots with discord.py.
 
-**Seven skills, one router, one installer.** The router reads the job,
+**Twelve skills, one router, one installer.** The router reads the job,
 loads the one skill the job needs, and each skill teaches one job:
-scaffolding, slash commands, a SQLite economy that cannot create
-money, honest i18n, deploys that restart themselves, and tests that
-can fail.
+scaffolding, slash commands, buttons and modals, a SQLite economy that cannot create
+money, honest i18n, deploys that restart themselves, tests that
+can fail, a web dashboard, antislop copy, the .newr language,
+and Hallmark design for the bot's look.
 
 `newr install all`
 
@@ -25,12 +26,16 @@ can fail.
 
 </div>
 
-Works with 31 AI coding agents, from Claude Code and Codex to
+Works with 33 AI coding agents, from Claude Code and Codex to
 Qwen Code, Kimi Code, Kiro, JetBrains Junie, Muse Code, and Grok
 Build, plus Aider via a `CONVENTIONS.md` digest. See
 [docs/AGENTS.md](docs/AGENTS.md) for the full list, including the
 agents with no skill system (Meta AI, DeepSeek chat, Qwen chat,
 Google Jules) that this pack honestly cannot install into.
+
+Documentation lives in `docs/`; the VitePress site in `website/`
+builds it into a searchable site (`cd website && npm install &&
+npm run docs:build`) — no hosted URL yet.
 
 ## Install with newr (like Homebrew)
 
@@ -39,29 +44,78 @@ install skills by name:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/drewdestar/discord-py-skills/main/install.sh | sh
+newr init                          # scaffold a working bot (asks for name, token, guild id)
 newr search
 newr install slash-commands
-newr install all               # all seven skills
-newr install starter-bot       # runnable starter bot into ./starter-bot
+newr install all                   # all twelve skills
+newr install starter-bot           # same starter bot, no prompts, into ./starter-bot
 ```
 
+`newr init` copies the starter bot into a new directory, writes your token into `.env` (never printed, never logged, never committed — `.gitignore` already covers it), and prints the next steps. `newr init --yes` accepts every default without prompting. `newr` resolves the latest release from GitHub Releases and falls back to `main` when no release is published yet or the lookup fails; see [Exit codes and machine output](#machine-readable-output-and-exit-codes).
+
 <p align="center">
-  <a href="assets/terminal-install.png"><img src="assets/terminal-install.png" alt="Terminal output of newr install all: all seven skills installed" width="100%" /></a>
+  <a href="assets/terminal-install.png"><img src="assets/terminal-install.png" alt="Terminal output of newr install all: all twelve skills installed" width="100%" /></a>
 </p>
 
-Real output of `newr install all` (v0.4.0). Skills install to
+Real output of `newr install all` (v0.5.0). Skills install to
 `~/.newr/skills/<name>`; `NEWR_HOME` overrides the prefix.
+
+**Requirements:** Python 3.10 or newer, Node.js 18 or newer (only for the
+npm package metadata), and git — on macOS or Linux. `newr` checks the
+Python version on startup and exits with a clear error on anything older.
+
+**Windows:** `newr` is a plain Python script, so it runs wherever
+Python 3.10+ runs. From a clone, run `newr.bat <command>` (the `.bat`
+launcher sits next to the `newr` script). `pip install .` also works and
+creates a `newr.exe` on Windows. Neither path has been run on a real
+Windows machine yet; both are UNVERIFIED there.
 
 | Command | What it does |
 |---|---|
 | `newr search [query]` | List installable packages |
 | `newr info <package>` | Show a package's details and install state |
-| `newr install <pkg>...` | Install packages (`all` = the seven skills) |
+| `newr install <pkg>...` | Install packages (`all` = the twelve skills) |
 | `newr uninstall <pkg>...` | Remove installed skills |
 | `newr list` | Show installed skills |
 | `newr update` | Refresh the registry and update installed skills |
+| `newr init` | Scaffold a starter bot (prompts for name, token, guild id) |
 | `newr version` | Print the newr version |
 | `newr agents` | List supported agents and their skill dirs |
+
+### Machine-readable output and exit codes
+
+For scripts and agents, run any command with `--json`: stdout is
+exactly one JSON object — `{ok, command, newr, data, warnings,
+error}` — logs go to stderr, and prompts are disabled. A failed
+command still prints one JSON object, with `error` set:
+
+```json
+{"ok": false, "command": "install", "newr": "0.5.0", "data": null,
+ "warnings": [], "error": {"code": "usage",
+ "message": "no package named 'slash-command'. Run `newr search` to see what exists.",
+ "hint": "Run `newr search` to see what exists."}}
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Usage error: bad command, flags, or package name |
+| 2 | Environment error: Python older than 3.10 |
+| 3 | Network error: registry, tarball, or release lookup failed |
+| 4 | Build error: `newr build` on a bad `.newr` file |
+
+`newr` checks the latest GitHub Release (unauthenticated GitHub API
+limit: 60 requests/hour; set `NEWR_GITHUB_TOKEN` to raise it to
+5,000) and falls back to `main` when no release exists yet or the
+lookup fails. `newr update --check` prints the verdict without
+changing anything. The full agent contract is in `llms.txt`.
+
+**Offline install:** `newr` fetches the registry and the skill files
+from GitHub by default. If the machine has no network, or you want a
+fixed copy, clone the repo and point `newr` at it:
+`NEWR_LOCAL_SOURCE=/path/to/discord-py-skills newr install all`.
+The local source wins over the network; everything else works the
+same. Network-first stays the default.
 
 Skills install to `~/.newr/skills/<name>` (`NEWR_HOME` overrides the
 prefix). Templates install into the current directory. No account, no
@@ -128,6 +182,10 @@ job: `using-discord-py-skills` routes the work first,
 
 ## Skills
 
+All twelve skills share the pack version in this release; per-skill
+versioning is a post-1.0 change. Run `newr list` to see the installed
+version of each skill.
+
 | Skill | What it covers | Use when |
 |---|---|---|
 | `using-discord-py-skills` | Routes any bot job to the right skill, in the right order | starting bot work, or unsure which skill applies |
@@ -137,20 +195,34 @@ job: `using-discord-py-skills` routes the work first,
 | `i18n` | Multi-language bots: per-user locale, fallback chain, translation pitfalls | "speak Indonesian", "wrong language replies" |
 | `deploy-and-monitor` | systemd service, watchdog restarts, log rotation, health checks, safe restarts | "keep my bot online", "my bot keeps dying" |
 | `testing` | Unit tests for logic, mocked interactions for commands, async tests with pytest-asyncio | "write tests", "the test passes but the bot is broken" |
+| `design-with-hallmark` | Hallmark themes for embeds, web dashboard, README visuals: 23 themes that survive Discord's dark client, embed color + limit checks | "make the bot look good", "my embeds all look the same" |
+| `antislop` | Stop the bot sounding AI-generated: no em dash, no invented numbers, no generic copy in replies, embeds, or code comments | "my bot sounds like AI", "make the replies sound human" |
+| `newr-language` | Write a small bot in the `.newr` language and compile it with `newr build` | "write a bot in .newr", "make me a small bot" |
+| `interactive-components` | Buttons, Views, modals, selects, pagination, Components V2 | "add buttons", "make a paginated leaderboard", "my buttons stop working" |
+| `bot-dashboard` | Web dashboard and backend API for a bot: one SQLite database, Discord OAuth2 login, live numbers | "make a dashboard for my bot", "show bot stats on a page" |
 
 ## How the router works
 
 `using-discord-py-skills` does no bot work itself. It reads the job,
 loads the one skill the job needs, and for a new bot it runs them in
-this order:
+this order. On the first bot-work turn it says, verbatim:
+
+> I'll build this with the discord-py-skills pack. First I'll match
+> your job to the one skill it needs and load only that skill — I
+> won't load the whole pack up front. Once that skill is loaded I'll
+> follow it, and if the job turns out to need a second skill I'll say
+> so and load that one next.
+
+Load on demand, never preload: the router loads only the skill the
+task actually reaches, when it reaches it. The full route table is in
+`skills/using-discord-py-skills/SKILL.md`.
 
 <p align="center">
-  <a href="assets/routing.png"><img src="assets/routing.png" alt="Router order: using-discord-py-skills, then build-discord-bot, slash-commands, economy-database, i18n, testing, deploy-and-monitor" width="100%" /></a>
+  <a href="assets/routing.png"><img src="assets/routing.png" alt="Router order: using-discord-py-skills, then build-discord-bot, slash-commands, interactive-components, economy-database, i18n, testing, design-with-hallmark, bot-dashboard, deploy-and-monitor" width="100%" /></a>
 </p>
 
 Skip steps that do not apply. Do not add an economy to a bot that has
 no currency, and do not add i18n to a bot with one language.
-Full route table: `skills/using-discord-py-skills/SKILL.md`.
 
 ## Write a bot in the newr language
 
@@ -267,6 +339,46 @@ their own implementations.
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=drewdestar/discord-py-skills&type=Date)](https://star-history.com/#drewdestar/discord-py-skills&Date)
+
+## What's new in 0.5.0
+
+0.5.0 never shipped, so the research-driven changes below fold into
+it. All twelve skills share the pack version; per-skill versioning
+is a post-1.0 change.
+
+- **bot-dashboard** (new skill): one-screen layout, per-widget
+  polling, FastAPI + Pydantic production server, Discord OAuth2
+  login gated by guild and role, the events endpoint, watch/notify,
+  environment-variable table, server-only vs browser rules, licence
+  safety, and a security checklist. Chart.js is the default chart;
+  ApexCharts is only ever named with its licence note.
+- **economy-database**: atomic compare-and-swap transfers, the
+  revision feed (global sequence + per-user version, compensating
+  rows instead of edits), migrations discipline with
+  `scripts/migrate.py` and a shadow-DB drift check, backups via the
+  backup API with verification and a portable dump, dashboard
+  read-only rules, `/daily` wiring, and a race test that fails a
+  naive check-then-insert.
+- **testing**: the ping sample now runs against the starter bot's
+  own pattern with a proven red check, the cooldown test fixed, the
+  database fence hardened, a wiring-test sketch, and pinned dev
+  requirements (pytest 9.2.0, pytest-asyncio 1.4.1.post1).
+- **using-discord-py-skills** (router): a verbatim first-response
+  blurb, four new route rows (`newr init`, install/update skills,
+  token leaked, stale dashboard numbers), and load-on-demand plus
+  discovery-first as the first rules.
+- **newr**: `--json` machine-readable output on every command,
+  typed exit codes (0/1/2/3/4), `llms.txt` agent contract, latest
+  release resolved from GitHub Releases with a 1-hour cache,
+  `newr init` scaffolding, `newr add` skill scaffolding, atomic
+  installs, clean errors on corrupt JSON, the detection circularity
+  fix, and `newr update --check`.
+- **build-discord-bot**, **interactive-components**, **starter bot**:
+  discord.py pin raised to `>=2.7.1` everywhere (Components V2
+  needs 2.6.0+; the pack was live-verified against 2.7.1).
+- **All skills**: bodies split into `references/` under the Codex
+  8 KB cap — the body stays complete and coherent, the detail lives
+  in `references/`, and the router loads both.
 
 ## Contributing
 

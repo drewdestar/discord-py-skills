@@ -22,3 +22,11 @@ Thumbs.db
 
 # Local test venv (not part of the repo)
 .venv-test/
+
+# Docs site (VitePress) — generated at build time, not checked in
+website/node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/
+docs/skills/
+docs/public/
+docs/router.md

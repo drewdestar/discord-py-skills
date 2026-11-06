@@ -6,11 +6,19 @@ installs formulae:
 
     newr search              list every installable package
     newr install slash-commands
-    newr install all         install all seven skills
+    newr install all         install all twelve skills
     newr install starter-bot install the runnable starter bot into ./starter-bot
+    newr init                scaffold a new bot project (prompts for name, token, guild id)
+    newr add <skill>         scaffold a new skill (boilerplate + registry entry)
     newr list                show installed skills
     newr update              refresh the registry and update installed skills
     newr uninstall testing
+
+Machine-readable output: pass --json anywhere (`newr --json install all`).
+Stdout is exactly one JSON object {ok, command, newr, data, warnings,
+error: {code, message, hint}|null}; logs and warnings go to stderr;
+prompts are disabled. Exit codes: 0 success; 1 usage error; 2
+environment error; 3 network error; 4 build error (newr build).
 
 Skills install to ~/.newr/skills/<name> by default (NEWR_HOME overrides
 the prefix). Templates install into the current directory unless
@@ -36,6 +44,8 @@ https://github.com/drewdestar/discord-py-skills; no account, no token,
 no build step. Python 3.10+ and the standard library only.
 """
 
+import difflib
+import getpass
 import json
 import os
 import re
@@ -43,16 +53,53 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "0.4.0"
+if sys.version_info < (3, 10):
+    # This check must run before any function definition below: the
+    # file uses `X | None` annotations (PEP 604, Python 3.10+), which
+    # raise TypeError at import time on older Pythons, before main()
+    # could ever print a friendlier error.
+    sys.stderr.write(
+        "newr requires Python 3.10 or newer (you have %s.%s). "
+        "Install Python 3.10+ and try again.\n" % sys.version_info[:2])
+    sys.exit(2)
+
+VERSION = "0.5.0"
 REPO = "drewdestar/discord-py-skills"
 REGISTRY_URL = "https://raw.githubusercontent.com/" + REPO + "/main/registry.json"
 TARBALL_URL = "https://codeload.github.com/" + REPO + "/tar.gz/refs/heads/main"
+RELEASES_API_URL = "https://api.github.com/repos/" + REPO + "/releases/latest"
+LATEST_TTL_SECONDS = 3600  # one API call per hour per machine, worst case
 RECEIPT = ".newr.json"
 CONVENTIONS = "CONVENTIONS.md"
+
+# --- machine-readable output (--json) ---
+# In --json mode stdout is exactly one JSON object (the envelope) and
+# nothing else; all human logs, progress, and warnings go to stderr,
+# and prompts are disabled. JSON_MODE is set once by main().
+JSON_MODE = False
+WARNINGS: list = []
+
+
+def out(*args, **kwargs) -> None:
+    """Human output: stdout, unless --json mode (stdout is one JSON object)."""
+    if not JSON_MODE:
+        print(*args, **kwargs)
+
+
+def warn(message: str) -> None:
+    """A warning: collected for the --json envelope AND printed to stderr."""
+    WARNINGS.append(message)
+    print(message, file=sys.stderr)
+
+
+def emit(obj: dict) -> None:
+    """Print exactly one JSON object to stdout (--json mode only)."""
+    print(json.dumps(obj))
 
 # Agent skill directories, from each agent's own documentation
 # (see docs/AGENTS.md for the sources). The registry carries the
@@ -93,6 +140,12 @@ BUILTIN_AGENTS = {
         "user": ["~/.copilot/skills"],
         "project": [".github/skills"],
         "detect": ["~/.copilot", "copilot"],
+    },
+    "vscode": {
+        "description": "VS Code (GitHub Copilot agent mode; paid Copilot subscription required)",
+        "user": ["~/.config/github-copilot/skills"],
+        "project": [".github/skills"],
+        "detect": ["~/.config/github-copilot", "code"],
     },
     "gemini": {
         "description": "Gemini CLI",
@@ -273,8 +326,61 @@ AGENT_ALIASES = {
 }
 
 
+_DEFAULT_HINTS = {
+    "usage": "Run `newr help`.",
+    "environment": "Check the environment (Python 3.10+, NEWR_LOCAL_SOURCE) and try again.",
+    "network": "Check your network connection and try again.",
+    "build": "Fix the .newr file and run `newr build --check` again.",
+}
+
+# Exit codes (see `newr help`): usage 1, environment 2, network 3,
+# build 4. Deliberately NOT Pake's numbering: Pake uses 2 for invalid
+# input, but this script already used 2 for "old Python", and moving
+# that guard for no user benefit would break scripts that check it.
+_EXIT_CODES = {"usage": 1, "environment": 2, "network": 3, "build": 4}
+
+
 class NewrError(Exception):
-    """A user-facing failure: print the message, exit 1."""
+    """A user-facing failure: print the message, exit non-zero.
+
+    Carries a machine-readable `code` (usage | environment | network
+    | build) and an actionable `hint`; main() maps the code to an
+    exit code, and --json mode carries both in the error object.
+    A missing hint is a bug: every error must tell the user what
+    to do next."""
+
+    code = "usage"
+
+    def __init__(self, message, code=None, hint=None):
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+        self.hint = hint if hint is not None else _DEFAULT_HINTS.get(self.code, "")
+
+
+class NewrUsageError(NewrError):
+    """Bad command, flags, or package/agent name. Exit 1."""
+
+    code = "usage"
+
+
+class NewrEnvError(NewrError):
+    """The environment is wrong (old Python, bad NEWR_LOCAL_SOURCE,
+    corrupt local file). Exit 2."""
+
+    code = "environment"
+
+
+class NewrNetworkError(NewrError):
+    """A download or API call failed. Exit 3."""
+
+    code = "network"
+
+
+class NewrBuildError(NewrError):
+    """`newr build` failed on a .newr file. Exit 4."""
+
+    code = "build"
 
 
 class NewrLangError(NewrError):
@@ -291,7 +397,23 @@ class NewrLangError(NewrError):
 # one file, so `curl | sh` installs and `npx github:` keep working
 # with no extra module to fetch.
 
-_NEWR_COMMAND_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+# Command names follow Discord's own rule, not an ASCII-only guess:
+# https://docs.discord.com/developers/interactions/application-commands
+# says CHAT_INPUT names match ^[-_\u02BC\p{L}\p{N}\p{sc=Deva}\p{sc=Thai}]{1,32}$
+# with the unicode flag, lowercase where a lowercase variant exists.
+# Python's re has no \p{}, so this mirrors discord.py's stdlib-only
+# translation of the same rule (Rapptz/discord.py commit 11d4dfd):
+# \w covers \p{L} + \p{N} + underscore, and the Thai/Devanagari
+# combining marks are listed by hand. \u02bc (modifier letter
+# apostrophe) is in the current Discord docs; discord.py's older
+# translation predates it, so it is added here explicitly.
+_NEWR_THAI_COMBINING = r"\u0e31-\u0e3a\u0e47-\u0e4e"
+_NEWR_DEVANAGARI_COMBINING = (
+    r"\u0900-\u0903\u093a\u093b\u093c\u093e\u093f\u0940-\u094f"
+    r"\u0955\u0956\u0957\u0962\u0963")
+_NEWR_COMMAND_NAME = re.compile(
+    r"^[-_\u02bc\w" + _NEWR_THAI_COMBINING + _NEWR_DEVANAGARI_COMBINING
+    + r"]{1,32}$")
 _NEWR_BLOCK_OPEN = re.compile(r"^(bot|command|event)\s+(.+):$")
 _NEWR_KEY_VALUE = re.compile(r"^([a-z_]+):\s*(.*)$")
 # Placeholders allowed in each reply/log context. A reply to a
@@ -307,6 +429,55 @@ _NEWR_PLACEHOLDERS = {
 _NEWR_BOT_KEYS = {"description"}
 _NEWR_COMMAND_KEYS = {"description", "reply", "ephemeral"}
 _NEWR_EVENT_KEYS = {"ready": {"log"}, "member_join": {"reply"}}
+
+# Placeholders expand at runtime: a mention is up to 22 characters
+# (<@123456789012345678>) and a server name up to 100. Measure a
+# reply at its longest possible expansion, so a build that passes
+# never fails at send time against Discord's 2000-character limit.
+_NEWR_PLACEHOLDER_MAX = {"user": 22, "guild": 100, "channel": 22}
+
+
+def _newr_suggest(word: str, options) -> str | None:
+    """Closest option to a mistyped word, or None. stdlib only."""
+    matches = difflib.get_close_matches(word, sorted(options), n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+
+def _newr_fn_name(name: str) -> str:
+    """A valid Python function name for a command, e.g. cmd_halo_dunia.
+
+    The generated handler is `cmd_<name>`, but `-` is legal in a
+    Discord command name and illegal in a Python identifier, so it
+    becomes `_`. Every other character Discord allows (any script's
+    letters, digits, underscore, Thai/Devanagari combining marks,
+    U+02BC) is already a valid identifier character after the `cmd_`
+    prefix, which the `compile()` check in cmd_build re-verifies.
+    Two different command names can sanitize to the same function
+    name (`foo-bar` and `foo_bar`); the parser rejects that pair
+    outright instead of letting one handler shadow the other.
+    """
+    return "cmd_" + name.replace("-", "_")
+
+
+def _newr_expanded_len(text: str) -> int:
+    """Length of text with each placeholder at its longest expansion."""
+    total = 0
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            end = text.find("}", i)
+            if end < 0:
+                # Unclosed "{" (the parser rejects these first, but this
+                # helper must never loop forever on raw text).
+                total += 1
+                i += 1
+                continue
+            total += _NEWR_PLACEHOLDER_MAX.get(text[i + 1:end], 0)
+            i = end + 1
+        else:
+            total += 1
+            i += 1
+    return total
 
 
 def _newr_unquote(value: str, line_no: int) -> str:
@@ -350,9 +521,11 @@ def _newr_check_placeholders(text: str, context: str, line_no: int) -> None:
                 raise NewrLangError(line_no, "unclosed placeholder in %r" % text)
             name = text[i + 1:end]
             if name not in allowed:
+                suggest = _newr_suggest(name, allowed)
+                hint = (" (did you mean {%s}?)" % suggest) if suggest else ""
                 raise NewrLangError(
-                    line_no, "unknown placeholder {%s} (allowed here: %s)"
-                    % (name, ", ".join(sorted(allowed))))
+                    line_no, "unknown placeholder {%s}%s (allowed here: %s)"
+                    % (name, hint, ", ".join(sorted(allowed))))
             i = end + 1
         elif ch == "}":
             raise NewrLangError(line_no, "stray } in %r" % text)
@@ -383,11 +556,44 @@ def parse_newr(text: str, source_name: str = "") -> dict:
         if kind == "event" and data["kind"] == "member_join" and data.get("reply") is None:
             raise NewrLangError(
                 block["line"], "member_join event has no reply")
+        # Discord rejects these at sync/send time, so fail at build
+        # time instead, while the fix is one line in the .newr file.
+        if kind == "command":
+            if not data["description"]:
+                raise NewrLangError(
+                    block["line"], "command %r has an empty description "
+                    "(Discord rejects empty descriptions)" % data["name"])
+            if not data["reply"]:
+                raise NewrLangError(
+                    block["line"], "command %r has an empty reply "
+                    "(Discord rejects empty messages)" % data["name"])
+            if len(data["description"]) > 100:
+                raise NewrLangError(
+                    block["line"], "command %r description is %d characters "
+                    "(Discord allows 100)" % (data["name"], len(data["description"])))
+            if _newr_expanded_len(data["reply"]) > 2000:
+                raise NewrLangError(
+                    block["line"], "command %r reply is %d characters after "
+                    "placeholder expansion (Discord allows 2000)"
+                    % (data["name"], _newr_expanded_len(data["reply"])))
+        if kind == "event" and data["kind"] == "member_join":
+            if not data["reply"]:
+                raise NewrLangError(
+                    block["line"], "member_join event has an empty reply "
+                    "(Discord rejects empty messages)")
+            if _newr_expanded_len(data["reply"]) > 2000:
+                raise NewrLangError(
+                    block["line"], "member_join reply is %d characters after "
+                    "placeholder expansion (Discord allows 2000)"
+                    % _newr_expanded_len(data["reply"]))
         if kind == "bot":
             parsed["bot"] = data
         elif kind == "command":
             parsed["commands"].append(data)
         else:
+            if any(e["kind"] == data["kind"] for e in parsed["events"]):
+                raise NewrLangError(
+                    block["line"], "duplicate event %r" % data["kind"])
             parsed["events"].append(data)
         block = None
 
@@ -415,8 +621,14 @@ def parse_newr(text: str, source_name: str = "") -> dict:
                        else _NEWR_COMMAND_KEYS if kind == "command"
                        else _NEWR_EVENT_KEYS[data["kind"]])
             if key not in allowed:
+                suggest = _newr_suggest(key, allowed)
+                hint = (" (did you mean %r?)" % suggest) if suggest else ""
                 raise NewrLangError(
-                    line_no, "unknown key %r in %s block" % (key, kind))
+                    line_no, "unknown key %r in %s block%s" % (key, kind, hint))
+            if key in block["keys"]:
+                raise NewrLangError(
+                    line_no, "duplicate key %r in %s block" % (key, kind))
+            block["keys"].add(key)
             if key == "ephemeral":
                 if value not in ("true", "false"):
                     raise NewrLangError(
@@ -433,8 +645,11 @@ def parse_newr(text: str, source_name: str = "") -> dict:
         # Top-level block opener.
         match = _NEWR_BLOCK_OPEN.match(stripped)
         if not match:
-            raise NewrLangError(line_no, "expected a block like `command ping:`, got %r"
-                                % stripped)
+            first = stripped.split(None, 1)[0].rstrip(":")
+            suggest = _newr_suggest(first, ("bot", "command", "event"))
+            hint = (" (did you mean %r?)" % suggest) if suggest else ""
+            raise NewrLangError(line_no, "expected a block like `command ping:`, got %r%s"
+                                % (stripped, hint))
         keyword, head = match.group(1), match.group(2)
         finish_block()
         if keyword == "bot":
@@ -443,19 +658,27 @@ def parse_newr(text: str, source_name: str = "") -> dict:
             name = _newr_unquote(head, line_no)
             if not 1 <= len(name) <= 32:
                 raise NewrLangError(line_no, "bot name must be 1-32 characters")
-            block = {"kind": "bot", "line": line_no,
+            block = {"kind": "bot", "line": line_no, "keys": set(),
                      "data": {"name": name, "description": None}}
         elif keyword == "command":
             if parsed["bot"] is None:
                 raise NewrLangError(
                     line_no, "no bot block yet: the bot block must come first")
-            if not _NEWR_COMMAND_NAME.match(head):
+            if (not _NEWR_COMMAND_NAME.match(head)
+                    or head != head.lower()):
                 raise NewrLangError(
-                    line_no, "invalid command name %r (lowercase letters, digits, "
-                    "underscores, starting with a letter)" % head)
+                    line_no, "invalid command name %r (Discord allows 1-32 "
+                    "lowercase letters, digits, _ and -; any language's "
+                    "letters count, including Thai and Devanagari)" % head)
             if any(c["name"] == head for c in parsed["commands"]):
                 raise NewrLangError(line_no, "duplicate command %r" % head)
-            block = {"kind": "command", "line": line_no,
+            if any(_newr_fn_name(c["name"]) == _newr_fn_name(head)
+                   for c in parsed["commands"]):
+                raise NewrLangError(
+                    line_no, "command %r collides with another command: "
+                    "both become the same generated function name %r "
+                    "(rename one of them)" % (head, _newr_fn_name(head)))
+            block = {"kind": "command", "line": line_no, "keys": set(),
                      "data": {"name": head, "description": head,
                               "reply": None, "ephemeral": False}}
         else:  # event
@@ -463,8 +686,10 @@ def parse_newr(text: str, source_name: str = "") -> dict:
                 raise NewrLangError(
                     line_no, "no bot block yet: the bot block must come first")
             if head not in ("ready", "member_join"):
-                raise NewrLangError(line_no, "unknown event %r" % head)
-            block = {"kind": "event", "line": line_no,
+                suggest = _newr_suggest(head, ("ready", "member_join"))
+                hint = (" (did you mean %r?)" % suggest) if suggest else ""
+                raise NewrLangError(line_no, "unknown event %r%s" % (head, hint))
+            block = {"kind": "event", "line": line_no, "keys": set(),
                      "data": {"kind": head}}
     finish_block()
     if parsed["bot"] is None:
@@ -494,6 +719,12 @@ def _newr_fstring(text: str, mapping: dict) -> str:
         ch = text[i]
         if ch == "{":
             end = text.find("}", i)
+            if end < 0:
+                # Unclosed "{" is a literal brace (the parser rejects
+                # these first; emit it escaped so the f-string stays valid).
+                out.append("{{")
+                i += 1
+                continue
             out.append("{%s}" % mapping[text[i + 1:end]])
             i = end + 1
         else:
@@ -561,10 +792,11 @@ def compile_newr(parsed: dict, source_name: str = "") -> str:
         add("")
         add('@bot.tree.command(name=%s, description=%s)'
             % (_newr_dq(cmd["name"]), _newr_dq(cmd["description"])))
-        add("async def cmd_%s(interaction: discord.Interaction) -> None:" % cmd["name"])
+        add("async def %s(interaction: discord.Interaction) -> None:"
+            % _newr_fn_name(cmd["name"]))
         mapping = {
             "user": "interaction.user.mention",
-            "guild": 'interaction.guild.name if interaction.guild else "DM"',
+            "guild": "interaction.guild.name if interaction.guild else 'DM'",
             "channel": "_channel_text(interaction.channel)",
         }
         call = "    await interaction.response.send_message(%s" % _newr_fstring(
@@ -608,7 +840,7 @@ def compile_newr(parsed: dict, source_name: str = "") -> str:
     return "\n".join(lines)
 
 
-def cmd_build(args: list) -> int:
+def cmd_build(args: list) -> dict:
     check = "--check" in args
     rest = [a for a in args if a != "--check"]
     output = None
@@ -629,27 +861,37 @@ def cmd_build(args: list) -> int:
             files.append(arg)
             i += 1
     if len(files) != 1:
-        raise NewrError("usage: newr build [--check] <file.newr> [-o <file.py>]")
+        raise NewrUsageError("usage: newr build [--check] <file.newr> [-o <file.py>]")
     src = Path(files[0])
     if not src.is_file():
-        raise NewrError("no such file: %s" % src)
+        raise NewrUsageError("no such file: %s" % src)
     try:
         text = src.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise NewrError("could not read %s as UTF-8 (%s)" % (src, exc))
+        raise NewrBuildError("could not read %s as UTF-8 (%s)" % (src, exc))
     try:
         parsed = parse_newr(text, str(src))
     except NewrLangError as exc:
-        raise NewrError("%s: %s" % (src, exc))
+        snippet = ""
+        lines = text.splitlines()
+        if 1 <= exc.line <= len(lines) and lines[exc.line - 1].strip():
+            snippet = "\n  > %s" % lines[exc.line - 1].strip()
+        raise NewrBuildError("%s: %s%s" % (src, exc, snippet))
     code = compile_newr(parsed, str(src))
+    try:
+        compile(code, str(src.with_suffix(".py")), "exec")
+    except SyntaxError as exc:
+        raise NewrBuildError("generated code does not compile (%s)" % exc)
     if check:
-        print("ok: %s (%d command(s), %d event(s))"
-              % (src, len(parsed["commands"]), len(parsed["events"])))
-        return 0
+        out("ok: %s (%d command(s), %d event(s))"
+            % (src, len(parsed["commands"]), len(parsed["events"])))
+        return {"output": None, "commands": len(parsed["commands"]),
+                "events": len(parsed["events"])}
     dest = Path(output) if output else src.with_suffix(".py")
     dest.write_text(code, encoding="utf-8")
-    print("built %s from %s" % (dest, src))
-    return 0
+    out("built %s from %s" % (dest, src))
+    return {"output": str(dest), "commands": len(parsed["commands"]),
+            "events": len(parsed["events"])}
 
 
 def home() -> Path:
@@ -677,7 +919,7 @@ def local_source() -> Path | None:
         path = Path(env)
         if (path / "registry.json").is_file():
             return path
-        raise NewrError("NEWR_LOCAL_SOURCE %s has no registry.json" % env)
+        raise NewrEnvError("NEWR_LOCAL_SOURCE %s has no registry.json" % env)
     here = Path(__file__).resolve().parent
     if (here / "registry.json").is_file():
         return here
@@ -690,7 +932,19 @@ def fetch_url(url: str, dest: Path) -> None:
         with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
     except Exception as exc:  # network, DNS, HTTP errors: one clean message
-        raise NewrError("could not fetch %s (%s)" % (url, exc))
+        raise NewrNetworkError("could not fetch %s (%s)" % (url, exc))
+
+
+def _read_json_file(path: Path, what: str) -> dict:
+    """Parse a JSON file, or raise an environment error — a corrupt
+    registry or receipt is a broken environment, not a usage error,
+    and the message must say which file and what to do about it."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise NewrEnvError(
+            "%s %s is not valid JSON (%s)" % (what, path, exc),
+            hint="Delete %s and try again." % path)
 
 
 def load_registry(refresh: bool = False) -> dict:
@@ -699,20 +953,166 @@ def load_registry(refresh: bool = False) -> dict:
     with a warning instead of dying."""
     source = local_source()
     if source is not None:
-        return json.loads((source / "registry.json").read_text(encoding="utf-8"))
+        return _read_json_file(source / "registry.json", "registry file")
     cache = registry_cache()
     if refresh or not cache.is_file():
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(".tmp")
         try:
-            fetch_url(os.environ.get("NEWR_REGISTRY_URL", REGISTRY_URL), tmp)
+            fetch_url(_registry_url(resolve_latest()), tmp)
         except NewrError:
             if cache.is_file():
-                print("warning: registry download failed, using cached copy", file=sys.stderr)
-                return json.loads(cache.read_text(encoding="utf-8"))
+                warn("warning: registry download failed, using cached copy")
+                return _read_json_file(cache, "registry cache")
             raise
         tmp.replace(cache)
-    return json.loads(cache.read_text(encoding="utf-8"))
+    return _read_json_file(cache, "registry cache")
+
+
+def _registry_url(tag: str | None) -> str:
+    """Registry URL: the NEWR_REGISTRY_URL override wins; else the
+    release tag when one is known; else main."""
+    env = os.environ.get("NEWR_REGISTRY_URL")
+    if env:
+        return env
+    if tag:
+        return "https://raw.githubusercontent.com/%s/%s/registry.json" % (REPO, tag)
+    return REGISTRY_URL
+
+
+def _tarball_url(tag: str | None) -> str:
+    """Tarball URL: the NEWR_TARBALL_URL override wins; else the
+    release tag when one is known; else main."""
+    env = os.environ.get("NEWR_TARBALL_URL")
+    if env:
+        return env
+    if tag:
+        return "https://codeload.github.com/%s/tar.gz/refs/tags/%s" % (REPO, tag)
+    return TARBALL_URL
+
+
+class _LatestNotFound(Exception):
+    """The Releases API answered 404: no releases published yet."""
+
+
+class _LatestRateLimited(Exception):
+    """The Releases API answered 403 with no quota left."""
+
+
+class _LatestUnavailable(Exception):
+    """The Releases API could not be reached or answered oddly."""
+
+
+def _latest_cache_path() -> Path:
+    return home() / "latest.json"
+
+
+def _read_latest_cache() -> tuple:
+    """(tag, checked_at) from the cache, or (None, None). Never raises."""
+    try:
+        data = json.loads(_latest_cache_path().read_text(encoding="utf-8"))
+        return data.get("tag"), data.get("checked_at")
+    except Exception:
+        return None, None
+
+
+def _cached_latest_tag() -> str | None:
+    """The cached tag, but only while the 1-hour TTL holds. No network."""
+    tag, checked_at = _read_latest_cache()
+    if not tag or not checked_at:
+        return None
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(checked_at)).total_seconds()
+    except ValueError:
+        return None
+    return tag if age < LATEST_TTL_SECONDS else None
+
+
+def _write_latest_cache(tag: str) -> None:
+    try:
+        path = _latest_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "tag": tag,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }), encoding="utf-8")
+    except OSError:
+        pass  # a cache that cannot be written is not an error
+
+
+def _fetch_latest_tag() -> str | None:
+    """One Releases API call. Returns the tag without a leading 'v',
+    or None when the response carries no tag."""
+    token = os.environ.get("NEWR_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "newr/" + VERSION,
+    }
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(RELEASES_API_URL, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise _LatestNotFound()
+        if exc.code == 403 and exc.headers.get("X-RateLimit-Remaining") == "0":
+            raise _LatestRateLimited()
+        raise _LatestUnavailable("HTTP %s" % exc.code)
+    except Exception as exc:
+        raise _LatestUnavailable(str(exc))
+    tag = data.get("tag_name") or ""
+    tag = tag[1:] if tag.startswith("v") else tag
+    return tag or None
+
+
+_LATEST_RESOLVED = {"done": False, "tag": None}
+
+
+def resolve_latest() -> str | None:
+    """Latest release tag (leading 'v' stripped), or None if unknown.
+
+    Fresh cache (1h TTL) -> live Releases API -> stale cache (with a
+    warning) -> None. A 404 means no releases published yet: None,
+    silently. A failed lookup is never fatal; callers fall back to
+    main. Never raises; memoized per process, so one command makes
+    at most one API call."""
+    if _LATEST_RESOLVED["done"]:
+        return _LATEST_RESOLVED["tag"]
+    cached = _cached_latest_tag()
+    if cached:
+        _LATEST_RESOLVED.update(done=True, tag=cached)
+        return cached
+    tag, checked_at = _read_latest_cache()
+    try:
+        latest = _fetch_latest_tag()
+    except _LatestNotFound:
+        _LATEST_RESOLVED.update(done=True, tag=None)
+        return None
+    except _LatestRateLimited:
+        warn("warning: GitHub API rate limit reached (60/hour unauthenticated); "
+             "using cached version. Set NEWR_GITHUB_TOKEN to raise the limit.")
+        if tag:
+            warn("warning: using cached latest %s from %s" % (tag, checked_at))
+            _LATEST_RESOLVED.update(done=True, tag=tag)
+            return tag
+        _LATEST_RESOLVED.update(done=True, tag=None)
+        return None
+    except _LatestUnavailable as exc:
+        warn("warning: could not check the latest release (%s); using main instead" % exc)
+        if tag:
+            warn("warning: using cached latest %s from %s" % (tag, checked_at))
+            _LATEST_RESOLVED.update(done=True, tag=tag)
+            return tag
+        _LATEST_RESOLVED.update(done=True, tag=None)
+        return None
+    if latest:
+        _write_latest_cache(latest)
+    _LATEST_RESOLVED.update(done=True, tag=latest)
+    return latest
 
 
 def agent_table(registry: dict) -> dict:
@@ -741,16 +1141,59 @@ def is_conventions_agent(agent: str, table: dict) -> bool:
     return bool(table.get(agent, {}).get("conventions", False))
 
 
+def _managed_first_components(table: dict) -> dict:
+    """For each ~/ marker, the first path components newr itself
+    creates under it (from the registry's user dirs).
+
+    Example: user dir "~/.claude/skills" under marker "~/.claude"
+    means newr creates "skills" there. A marker dir that contains
+    only such components was made by newr, not by the agent."""
+    managed: dict = {}
+    for entry in table.values():
+        for d in entry.get("user", []):
+            if not d.startswith("~/"):
+                continue
+            parts = d[2:].split("/")
+            if len(parts) < 2:
+                continue
+            managed.setdefault("~/" + parts[0], set()).add(parts[1])
+    return managed
+
+
 def detect_agents(table: dict) -> list:
-    """Agents whose marker exists on this machine: a $HOME path
-    (dir or file) or a binary on $PATH."""
+    """Agents whose marker exists on this machine.
+
+    A ~/ path marker counts only if it contains an entry newr did
+    NOT create: the marker dir is listed, and it must hold something
+    outside the set of first-components newr itself creates under it
+    (a real install has settings, projects, or config files; a dir
+    newr made holds only its skill dirs). That breaks the
+    circularity where installing skills created the very marker
+    detection looks for. A marker with nothing managed under it
+    counts on existence alone, as does a file marker (e.g.
+    ~/.aider.conf.yml, which newr never creates) and a binary on
+    $PATH."""
+    managed = _managed_first_components(table)
     found = []
     for name, entry in table.items():
         for marker in entry.get("detect", []):
             if marker.startswith("~/"):
-                if expand_user_dir(marker).exists():
-                    found.append(name)
-                    break
+                path = expand_user_dir(marker)
+                if not path.exists():
+                    continue
+                if path.is_dir():
+                    allowed = managed.get(marker, set())
+                    try:
+                        entries = {p.name for p in path.iterdir()}
+                    except OSError:
+                        found.append(name)
+                        break
+                    if entries - allowed:
+                        found.append(name)
+                        break
+                    continue  # only newr-created entries (or empty): not detected
+                found.append(name)  # a file marker: existence counts
+                break
             elif shutil.which(marker):
                 found.append(name)
                 break
@@ -774,10 +1217,10 @@ def resolve_agent_spec(spec: str, table: dict) -> list:
         elif name in table:
             wanted.append(name)
         else:
-            raise NewrError(
+            raise NewrUsageError(
                 "unknown agent '%s'. Run `newr agents` to see the supported agents."
-                % part.strip()
-            )
+                % part.strip(),
+                hint="Run `newr agents` to see the supported agents.")
     seen = set()
     return [n for n in wanted if not (n in seen or seen.add(n))]
 
@@ -790,10 +1233,12 @@ def resolve(name: str, registry: dict) -> dict:
     """One package by name. 'all' and the repo name mean every skill."""
     if name in ("all", "discord-py-skills"):
         return {"name": "all", "type": "bundle", "version": registry.get("version", "?"),
-                "description": "all seven skills", "path": ""}
+                "description": "all twelve skills", "path": ""}
     found = packages(registry).get(name)
     if found is None:
-        raise NewrError("no package named '%s'. Run `newr search` to see what exists." % name)
+        raise NewrUsageError(
+            "no package named '%s'. Run `newr search` to see what exists." % name,
+            hint="Run `newr search` to see what exists.")
     return found
 
 
@@ -805,15 +1250,15 @@ def package_source(registry: dict) -> Path:
         return source
     tmp = Path(tempfile.mkdtemp(prefix="newr-"))
     archive = tmp / "repo.tar.gz"
-    fetch_url(os.environ.get("NEWR_TARBALL_URL", TARBALL_URL), archive)
+    fetch_url(_tarball_url(resolve_latest()), archive)
     try:
         with tarfile.open(archive, "r:gz") as tf:
-            tf.extractall(tmp)
+            tf.extractall(tmp, filter="data")
     except Exception as exc:
-        raise NewrError("could not unpack the repo archive (%s)" % exc)
+        raise NewrNetworkError("could not unpack the repo archive (%s)" % exc)
     roots = [d for d in tmp.iterdir() if d.is_dir()]
     if not roots:
-        raise NewrError("downloaded repo archive is empty")
+        raise NewrNetworkError("downloaded repo archive is empty")
     return roots[0]
 
 
@@ -828,7 +1273,7 @@ def dest_for(pkg: dict, target: Path | None) -> Path:
 def receipt_at(dest: Path) -> dict | None:
     receipt = dest / RECEIPT
     if receipt.is_file():
-        return json.loads(receipt.read_text(encoding="utf-8"))
+        return _read_json_file(receipt, "receipt")
     return None
 
 
@@ -836,23 +1281,50 @@ def installed_receipt(pkg_name: str) -> dict | None:
     return receipt_at(skills_dir() / pkg_name)
 
 
+def _atomic_copytree(src: Path, dest: Path) -> None:
+    """Copy src to dest, leaving the old dest intact if killed mid-copy.
+
+    Copies to a temp sibling first, then removes the old dest and
+    renames the temp dir into place. A kill during the copy leaves
+    the old version (and an orphaned temp dir) behind; the rename
+    itself is one syscall."""
+    tmp = dest.with_name(dest.name + ".tmp-%d" % os.getpid())
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    shutil.copytree(src, tmp, ignore=shutil.ignore_patterns("__pycache__"))
+    if dest.exists():
+        shutil.rmtree(dest)
+    os.replace(tmp, dest)
+
+
 def install_one(pkg: dict, source_root: Path, target: Path | None,
                 force: bool, agent: str | None = None,
-                refresh: bool = False) -> str:
+                refresh: bool = False) -> dict:
+    """Install one package.
+
+    Returns {"status": "installed" | "already_installed", "name",
+    "version", "path", "agent"?}. The caller renders the dict for
+    humans (format_install_result) or carries it in the --json data.
+    The copy is atomic: a kill mid-copy leaves the old version intact,
+    and the receipt is written into the temp dir before the rename,
+    so the dest is complete the moment it appears."""
     dest = dest_for(pkg, target)
     receipt = receipt_at(dest)
     # A --target install is an explicit placement: always refresh it.
     # A managed install (default dir or an agent dir) is a noop when
     # the same version is already there.
     if receipt and receipt.get("version") == pkg["version"] and not force and not refresh:
-        where = "for %s " % agent if agent else ""
-        return "already installed: %s %s %s-> %s" % (pkg["name"], pkg["version"], where, dest)
+        result: dict = {"status": "already_installed", "name": pkg["name"],
+                        "version": pkg["version"], "path": str(dest)}
+        if agent:
+            result["agent"] = agent
+        return result
     src = source_root / pkg["path"]
     if not src.is_dir():
-        raise NewrError("package %s is missing from the source (%s)" % (pkg["name"], pkg["path"]))
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(src, dest)
+        raise NewrEnvError(
+            "package %s is missing from the source (%s)" % (pkg["name"], pkg["path"]),
+            hint="Run `newr update` to refresh the registry.")
+    _atomic_copytree(src, dest)
     data = {
         "name": pkg["name"],
         "type": pkg["type"],
@@ -863,22 +1335,92 @@ def install_one(pkg: dict, source_root: Path, target: Path | None,
     if agent:
         data["agent"] = agent
     (dest / RECEIPT).write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return "installed %s %s -> %s" % (pkg["name"], pkg["version"], dest)
+    result = {"status": "installed", "name": pkg["name"],
+              "version": pkg["version"], "path": str(dest)}
+    if agent:
+        result["agent"] = agent
+    return result
 
 
-def install_conventions(source_root: Path, dest_dir: Path) -> str:
+def format_install_result(result: dict) -> str:
+    """The human line for one install_one result."""
+    where = "for %s " % result["agent"] if result.get("agent") else ""
+    if result["status"] == "already_installed":
+        return "already installed: %s %s %s-> %s" % (
+            result["name"], result["version"], where, result["path"])
+    return "installed %s %s -> %s" % (
+        result["name"], result["version"], result["path"])
+
+
+def install_conventions(source_root: Path, dest_dir: Path) -> dict:
     """Aider has no skill system, so it gets a CONVENTIONS.md digest
     of the whole pack instead of skill folders."""
     src = source_root / "aider" / CONVENTIONS
     if not src.is_file():
-        raise NewrError("the Aider conventions file is missing from the source")
+        raise NewrEnvError(
+            "the Aider conventions file is missing from the source",
+            hint="Run `newr update` to refresh the registry.")
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / CONVENTIONS
-    shutil.copyfile(src, dest)
+    tmp = dest.with_name(dest.name + ".tmp-%d" % os.getpid())
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dest)
+    return {"status": "installed", "kind": "conventions",
+            "agent": "aider", "path": str(dest)}
+
+
+def format_conventions_result(result: dict) -> str:
+    """The human lines for one install_conventions result."""
+    dest = result["path"]
     return ("installed Aider conventions -> %s\n"
             "  Aider has no skill system. Add this file to .aider.conf.yml:\n"
             "    read:\n"
             "      - %s" % (dest, dest))
+
+
+def install_to_agents(wanted: list, source_root: Path, table: dict,
+                      agents: list, project: bool, force: bool) -> list:
+    """Install wanted packages into each agent's dirs. Returns the
+    install_one / install_conventions result dicts, in order."""
+    results = []
+    for agent in agents:
+        if is_conventions_agent(agent, table):
+            for base in agent_dirs(agent, table, project):
+                results.append(install_conventions(source_root, base))
+            continue
+        for base in agent_dirs(agent, table, project):
+            for pkg in wanted:
+                results.append(install_one(pkg, source_root, base / pkg["name"],
+                                           force, agent=agent))
+    return results
+
+
+def _install_data(results: list) -> dict:
+    """The --json data for an install: installed / already_installed
+    skill entries ({name, version, path, agent?}) plus a conventions
+    list when Aider was involved."""
+    installed = []
+    already = []
+    conventions = []
+    for r in results:
+        if r.get("kind") == "conventions":
+            conventions.append({"agent": r.get("agent", "aider"), "path": r["path"]})
+        elif r.get("status") == "installed":
+            installed.append(_skill_entry(r))
+        else:
+            already.append(_skill_entry(r))
+    data: dict = {"installed": installed, "already_installed": already}
+    if conventions:
+        data["conventions"] = conventions
+    return data
+
+
+def _skill_entry(result: dict) -> dict:
+    entry = {"name": result["name"], "version": result["version"],
+             "path": result["path"]}
+    if result.get("agent"):
+        entry["agent"] = result["agent"]
+    return entry
 
 
 def parse_agent_flags(args: list) -> tuple:
@@ -905,39 +1447,48 @@ def parse_agent_flags(args: list) -> tuple:
     return specs, project, rest
 
 
-def cmd_search(args: list) -> int:
+def cmd_search(args: list) -> dict:
     registry = load_registry()
     query = " ".join(args).lower() if args else ""
     rows = [p for p in registry.get("packages", [])
             if not query or query in p["name"].lower() or query in p["description"].lower()]
-    if not rows:
-        print("no packages match '%s'" % query)
-        return 0
+    found = []
     for p in rows:
         installed = installed_receipt(p["name"])
         mark = " [installed %s]" % installed["version"] if installed else ""
-        print("%-24s %-8s %s%s" % (p["name"], p["type"], p["description"], mark))
-    return 0
+        out("%-24s %-8s %s%s" % (p["name"], p["type"], p["description"], mark))
+        found.append({"name": p["name"], "type": p["type"],
+                      "version": p["version"], "description": p["description"],
+                      "installed": bool(installed)})
+    if not rows:
+        out("no packages match '%s'" % query)
+    return {"packages": found}
 
 
-def cmd_info(args: list) -> int:
+def cmd_info(args: list) -> dict:
     if len(args) != 1:
-        raise NewrError("usage: newr info <package>")
+        raise NewrUsageError("usage: newr info <package>")
     registry = load_registry()
     pkg = resolve(args[0], registry)
+    data = dict(pkg)
     if pkg["type"] == "bundle":
-        print("all: the seven skills in the discord-py-skills pack")
-        return 0
-    print("name:        %s" % pkg["name"])
-    print("type:        %s" % pkg["type"])
-    print("version:     %s" % pkg["version"])
-    print("description: %s" % pkg["description"])
-    print("path:        %s" % pkg["path"])
+        out("all: the twelve skills in the discord-py-skills pack")
+        data["installed"] = None
+        data["also_installed_for_agents"] = []
+        return data
+    out("name:        %s" % pkg["name"])
+    out("type:        %s" % pkg["type"])
+    out("version:     %s" % pkg["version"])
+    out("description: %s" % pkg["description"])
+    out("path:        %s" % pkg["path"])
     receipt = installed_receipt(pkg["name"])
     if receipt:
-        print("installed:   %s (%s)" % (receipt["version"], receipt["installed_at"]))
+        out("installed:   %s (%s)" % (receipt["version"], receipt["installed_at"]))
+        data["installed"] = {"version": receipt["version"],
+                             "installed_at": receipt["installed_at"]}
     else:
-        print("installed:   no")
+        out("installed:   no")
+        data["installed"] = None
     table = agent_table(registry)
     hits = []
     for name in table:
@@ -948,11 +1499,12 @@ def cmd_info(args: list) -> int:
                 hits.append(name)
                 break
     if hits:
-        print("also installed for agents: %s" % ", ".join(sorted(set(hits))))
-    return 0
+        out("also installed for agents: %s" % ", ".join(sorted(set(hits))))
+    data["also_installed_for_agents"] = sorted(set(hits))
+    return data
 
 
-def cmd_install(args: list) -> int:
+def cmd_install(args: list) -> dict:
     specs, project, rest = parse_agent_flags(args)
     force = "--force" in rest
     target = None
@@ -971,11 +1523,11 @@ def cmd_install(args: list) -> int:
             names.append(rest[i])
             i += 1
     if not names:
-        raise NewrError("usage: newr install <package>... | newr install all")
+        raise NewrUsageError("usage: newr install <package>... | newr install all")
     if target is not None and len(names) > 1:
-        raise NewrError("--target installs one package at a time")
+        raise NewrUsageError("--target installs one package at a time")
     if target is not None and specs:
-        raise NewrError("use --agent or --target, not both")
+        raise NewrUsageError("use --agent or --target, not both")
     registry = load_registry()
     wanted = []
     for name in names:
@@ -992,49 +1544,51 @@ def cmd_install(args: list) -> int:
         if project:
             specs = ["agents"]
         else:
-            for pkg in wanted:
-                print(install_one(pkg, source_root, target, force,
-                                  refresh=target is not None))
-            return 0
+            results = [install_one(pkg, source_root, target, force,
+                                   refresh=target is not None) for pkg in wanted]
+            for r in results:
+                out(format_install_result(r))
+            return _install_data(results)
     table = agent_table(registry)
     agents = []
     for spec in specs:
         agents.extend(resolve_agent_spec(spec, table))
     agents = list(dict.fromkeys(agents))
     if not agents:
-        raise NewrError("no agent detected on this machine. "
-                        "Pick one explicitly: newr install --agent claude-code <package>")
+        raise NewrUsageError("no agent detected on this machine. "
+                             "Pick one explicitly: newr install --agent claude-code <package>")
     if any(p["type"] == "template" for p in wanted):
-        raise NewrError("templates cannot install into an agent skill directory. "
-                        "Install a template without --agent (it goes into the current directory).")
-    for agent in agents:
-        if is_conventions_agent(agent, table):
-            for base in agent_dirs(agent, table, project):
-                print(install_conventions(source_root, base))
-            continue
-        for base in agent_dirs(agent, table, project):
-            for pkg in wanted:
-                print(install_one(pkg, source_root, base / pkg["name"],
-                                  force, agent=agent))
-    return 0
+        raise NewrUsageError("templates cannot install into an agent skill directory. "
+                             "Install a template without --agent (it goes into the current directory).")
+    results = install_to_agents(wanted, source_root, table, agents, project, force)
+    for r in results:
+        if r.get("kind") == "conventions":
+            out(format_conventions_result(r))
+        else:
+            out(format_install_result(r))
+    return _install_data(results)
 
 
-def cmd_uninstall(args: list) -> int:
+def cmd_uninstall(args: list) -> dict:
     specs, project, rest = parse_agent_flags(args)
     if not rest:
-        raise NewrError("usage: newr uninstall <package>...")
+        raise NewrUsageError("usage: newr uninstall <package>...")
+    removed: list = []
+    not_installed: list = []
     if not specs:
         if project:
-            raise NewrError("newr uninstall --project needs --agent: "
-                            "newr uninstall --agent <name> --project <package>")
+            raise NewrUsageError("newr uninstall --project needs --agent: "
+                                 "newr uninstall --agent <name> --project <package>")
         for name in rest:
             dest = skills_dir() / name
             if dest.is_dir():
                 shutil.rmtree(dest)
-                print("uninstalled %s" % name)
+                out("uninstalled %s" % name)
+                removed.append(name)
             else:
-                print("not installed: %s" % name)
-        return 0
+                out("not installed: %s" % name)
+                not_installed.append(name)
+        return {"removed": removed, "not_installed": not_installed}
     registry = load_registry()
     table = agent_table(registry)
     agents = []
@@ -1046,57 +1600,69 @@ def cmd_uninstall(args: list) -> int:
                 dest = base / name
                 if dest.is_dir():
                     shutil.rmtree(dest)
-                    print("uninstalled %s (for %s)" % (name, agent))
+                    out("uninstalled %s (for %s)" % (name, agent))
+                    removed.append(name)
                 else:
-                    print("not installed: %s (for %s)" % (name, agent))
-    return 0
+                    out("not installed: %s (for %s)" % (name, agent))
+                    not_installed.append(name)
+    return {"removed": list(dict.fromkeys(removed)),
+            "not_installed": list(dict.fromkeys(not_installed))}
 
 
-def cmd_list(args: list) -> int:
+def cmd_list(args: list) -> dict:
     specs, project, rest = parse_agent_flags(args)
     if rest:
-        raise NewrError("usage: newr list [--agent <name>] [--project]")
+        raise NewrUsageError("usage: newr list [--agent <name>] [--project]")
     if not specs:
         if project:
             specs = ["agents"]
         else:
-            return list_dir(skills_dir())
+            return {"skills": list_dir(skills_dir())}
     registry = load_registry()
     table = agent_table(registry)
     agents = []
     for spec in specs:
         agents.extend(resolve_agent_spec(spec, table))
+    groups = []
     for agent in dict.fromkeys(agents):
         for base in agent_dirs(agent, table, project):
             if is_conventions_agent(agent, table):
                 dest = base / CONVENTIONS
-                print("%s: %s" % (agent, "installed" if dest.is_file() else "not installed"))
+                state = "installed" if dest.is_file() else "not installed"
+                out("%s: %s" % (agent, state))
+                groups.append({"agent": agent, "dir": str(base),
+                               "skills": [], "conventions": state})
                 continue
-            print("# %s (%s)" % (agent, base))
-            list_dir(base)
-    return 0
+            out("# %s (%s)" % (agent, base))
+            groups.append({"agent": agent, "dir": str(base),
+                           "skills": list_dir(base)})
+    return {"agents": groups}
 
 
-def list_dir(base: Path) -> int:
+def list_dir(base: Path) -> list:
+    """Installed skills in one dir, as [{name, version, path}].
+    Prints them too."""
     if not base.is_dir():
-        print("nothing installed yet. Run `newr search`, then `newr install <package>`.")
-        return 0
-    found = False
+        out("nothing installed yet. Run `newr search`, then `newr install <package>`.")
+        return []
+    found = []
     for child in sorted(base.iterdir()):
         if not child.is_dir():
             continue
         receipt = receipt_at(child)
         if receipt:
-            print("%-24s %-8s %s" % (receipt["name"], receipt["version"], child))
-            found = True
+            out("%-24s %-8s %s" % (receipt["name"], receipt["version"], child))
+            found.append({"name": receipt["name"], "version": receipt["version"],
+                          "path": str(child)})
     if not found:
-        print("nothing installed yet. Run `newr search`, then `newr install <package>`.")
-    return 0
+        out("nothing installed yet. Run `newr search`, then `newr install <package>`.")
+    return found
 
 
-def cmd_update(args: list) -> int:
+def cmd_update(args: list) -> dict:
+    check = "--check" in args
     registry = load_registry(refresh=True)
-    print("registry %s" % registry.get("version", "?"))
+    out("registry %s" % registry.get("version", "?"))
     table = agent_table(registry)
     # Every managed skill dir: the default one plus each agent's user
     # dirs (deduped). Project dirs are inside repos, so they are
@@ -1120,68 +1686,449 @@ def cmd_update(args: list) -> int:
                 continue
             pkg = packages(registry).get(child.name)
             if pkg and pkg["version"] != receipt.get("version"):
-                wanted.append((agent, pkg))
+                wanted.append((agent, pkg, receipt.get("version")))
+    updated = [{"name": pkg["name"], "from_version": frm,
+                "to_version": pkg["version"]} for _, pkg, frm in wanted]
     if not wanted:
-        print("everything is up to date")
-        return 0
+        out("everything is up to date")
+        return {"updated": [], "up_to_date": True}
+    if check:
+        # Dry-run verdict, no writes.
+        out("update available: %s -> %s"
+            % (wanted[0][2], registry.get("version", "?")))
+        for _, pkg, frm in wanted:
+            out("  %s: %s -> %s" % (pkg["name"], frm, pkg["version"]))
+        return {"updated": updated, "up_to_date": False}
     source_root = package_source(registry)
-    for agent, pkg in wanted:
+    for agent, pkg, _ in wanted:
         if agent is None:
-            print(install_one(pkg, source_root, None, force=True))
+            out(format_install_result(install_one(pkg, source_root, None, force=True)))
         else:
             for base in agent_dirs(agent, table, project=False):
                 dest = base / pkg["name"]
                 if receipt_at(dest) and receipt_at(dest).get("version") != pkg["version"]:
-                    print(install_one(pkg, source_root, dest, force=True, agent=agent))
-    return 0
+                    out(format_install_result(
+                        install_one(pkg, source_root, dest, force=True, agent=agent)))
+    return {"updated": updated, "up_to_date": False}
 
 
-def cmd_agents(args: list) -> int:
+def cmd_agents(args: list) -> dict:
     registry = load_registry()
     table = agent_table(registry)
     detected = set(detect_agents(table))
-    print("%-14s %-8s %-28s %s" % ("agent", "detected", "user skill dir", "project skill dir"))
+    out("%-14s %-8s %-28s %s" % ("agent", "detected", "user skill dir", "project skill dir"))
+    agents = []
     for name, entry in table.items():
         user = ", ".join(entry.get("user", []))
         project = ", ".join(entry.get("project", []))
         mark = "yes" if name in detected else "no"
-        print("%-14s %-8s %-28s %s" % (name, mark, user, project))
-    print()
-    print("Install examples:")
-    print("  newr install --agent claude-code all")
-    print("  newr install --agent auto all        (only the agents detected above)")
-    print("  newr install --agent copilot --project testing")
-    print("Aider has no skill system; --agent aider installs CONVENTIONS.md instead.")
-    return 0
+        out("%-14s %-8s %-28s %s" % (name, mark, user, project))
+        agents.append({"name": name, "detected": name in detected,
+                       "user_dirs": entry.get("user", []),
+                       "project_dirs": entry.get("project", [])})
+    out()
+    out("Install examples:")
+    out("  newr install --agent claude-code all")
+    out("  newr install --agent auto all        (only the agents detected above)")
+    out("  newr install --agent copilot --project testing")
+    out("Aider has no skill system; --agent aider installs CONVENTIONS.md instead.")
+    return {"agents": agents}
 
 
-def cmd_version(args: list) -> int:
-    print("newr %s" % VERSION)
-    return 0
+def cmd_version(args: list) -> dict:
+    out("newr %s" % VERSION)
+    # Human mode reads the cache only: `newr version` must never
+    # block on a network call. --json mode resolves fully (N-04).
+    latest = resolve_latest() if JSON_MODE else _cached_latest_tag()
+    if latest and latest != VERSION:
+        out("update available: %s -> %s (run `newr update`)" % (VERSION, latest))
+    return {"newr": VERSION, "latest": latest,
+            "update_available": bool(latest and latest != VERSION)}
+
+
+INIT_MINIMAL_SKILLS = ["using-discord-py-skills", "build-discord-bot",
+                       "slash-commands", "testing"]
+
+
+def _prompt(text: str, default: str | None = None) -> str:
+    """One interactive prompt. Blank input takes the default (when given)."""
+    try:
+        if default:
+            answer = input("%s [%s]: " % (text, default)).strip()
+            return answer or default
+        return input("%s: " % text).strip()
+    except EOFError:
+        raise NewrUsageError("cancelled (no input)")
+
+
+def _check_bot_name(name: str) -> None:
+    """Bot names follow the .newr rule: 1-32 characters, and no path
+    separator (the name becomes a directory)."""
+    if not 1 <= len(name) <= 32:
+        raise NewrUsageError("bot name must be 1-32 characters, got %d" % len(name))
+    if "/" in name or "\\" in name or "\x00" in name:
+        raise NewrUsageError("bot name must not contain a path separator")
+
+
+def _set_env_value(text: str, key: str, value: str) -> str:
+    """Set KEY=value in .env text, replacing the line or appending it."""
+    pattern = re.compile(r"^%s=.*$" % re.escape(key), re.M)
+    if pattern.search(text):
+        return pattern.sub(lambda m: "%s=%s" % (key, value), text)
+    return text.rstrip("\n") + "\n%s=%s\n" % (key, value)
+
+
+def _mentions_discord_py(path: Path) -> bool:
+    try:
+        return "discord.py" in path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def cmd_init(args: list) -> dict:
+    """Scaffold a working bot project from the starter-bot template.
+
+    Prompts for bot name, token (hidden input), test guild id, and
+    whether to install skills — or takes them all as flags. The token
+    is written only into the project's .env, never echoed, logged,
+    or printed, and never validated against Discord (a wrong token
+    fails fast at `python bot.py`, which is the existing behaviour).
+    Skills default to the minimal set for the detected agents
+    (--agent auto behaviour); --agent / --project override that."""
+    specs, project, rest = parse_agent_flags(args)
+    yes = "--yes" in rest
+    force = "--force" in rest
+    name = None
+    target = None
+    guild_id = None
+    skills_opt = "minimal"
+    i = 0
+    positional = []
+    while i < len(rest):
+        arg = rest[i]
+        if arg in ("--yes", "--force"):
+            i += 1
+        elif arg == "--name" and i + 1 < len(rest):
+            name = rest[i + 1]
+            i += 2
+        elif arg.startswith("--name="):
+            name = arg[len("--name="):]
+            i += 1
+        elif arg == "--dir" and i + 1 < len(rest):
+            target = Path(rest[i + 1])
+            i += 2
+        elif arg.startswith("--dir="):
+            target = Path(arg[len("--dir="):])
+            i += 1
+        elif arg == "--guild-id" and i + 1 < len(rest):
+            guild_id = rest[i + 1]
+            i += 2
+        elif arg.startswith("--guild-id="):
+            guild_id = arg[len("--guild-id="):]
+            i += 1
+        elif arg == "--skills" and i + 1 < len(rest):
+            skills_opt = rest[i + 1]
+            i += 2
+        elif arg.startswith("--skills="):
+            skills_opt = arg[len("--skills="):]
+            i += 1
+        elif arg.startswith("--"):
+            raise NewrUsageError("unknown flag for init: %s" % arg)
+        else:
+            positional.append(arg)
+            i += 1
+    if positional:
+        raise NewrUsageError(
+            "usage: newr init [--yes] [--name <name>] [--dir <path>] "
+            "[--guild-id <id>] [--skills <all|minimal|none>] [--force] "
+            "[--agent <name>] [--project]")
+    if skills_opt not in ("all", "minimal", "none"):
+        raise NewrUsageError("--skills must be all, minimal, or none, got %r" % skills_opt)
+    if guild_id is not None and not guild_id.isdigit():
+        raise NewrUsageError("guild id must be digits, got %r" % guild_id)
+    if JSON_MODE and not yes:
+        raise NewrUsageError(
+            "init needs --yes in --json mode; pass --name, --dir, and --guild-id explicitly")
+    if name is not None:
+        _check_bot_name(name)
+    dir_given = target is not None
+    if target is None and name is not None:
+        target = Path.cwd() / name.lower()
+    if name is None and target is not None:
+        name = target.name or "my-bot"
+    if name is None:
+        name = "my-bot"
+    if target is None:
+        target = Path.cwd() / name.lower()
+    token = None
+    install_skills = skills_opt != "none"
+    if not yes:
+        name = _prompt("Bot name", name)
+        _check_bot_name(name)
+        if not dir_given:
+            target = Path.cwd() / name.lower()
+        # Hidden input: never echoed, never logged, never printed.
+        token = getpass.getpass(
+            "Bot token (paste now, or leave blank to fill in .env later): ")
+        if guild_id is None:
+            guild_id = (_prompt("Test guild id for instant command sync "
+                                "(blank = sync globally, up to 1 hour to appear)")
+                        or None)
+            if guild_id and not guild_id.isdigit():
+                raise NewrUsageError("guild id must be digits, got %r" % guild_id)
+        if skills_opt == "minimal":
+            answer = _prompt("Install skills into this project? [Y/n]", "Y")
+            install_skills = answer.lower() not in ("n", "no")
+    if target.exists() and not target.is_dir():
+        raise NewrUsageError("%s already exists and is not a directory" % target)
+    if target.is_dir() and any(target.iterdir()):
+        is_project = ((target / "bot.py").is_file()
+                      or (target / "config.py").is_file()
+                      or _mentions_discord_py(target / "requirements.txt"))
+        if not force:
+            if is_project:
+                raise NewrUsageError(
+                    "%s already exists and looks like a discord.py project "
+                    "(bot.py/config.py present); use --force to overwrite or "
+                    "pick another directory with --dir" % target)
+            raise NewrUsageError(
+                "%s already exists and is not empty; use --force to overwrite "
+                "or pick another directory with --dir" % target)
+    registry = load_registry()
+    pkg = resolve("starter-bot", registry)
+    source_root = package_source(registry)
+    src = source_root / pkg["path"]
+    if not src.is_dir():
+        raise NewrEnvError("starter-bot template is missing from the source (%s)"
+                           % pkg["path"])
+    # .env must never be committable: the template has to ship a
+    # .gitignore that lists it. Checked before copying, so a bad
+    # template leaves no half-created project behind.
+    gitignore_src = src / ".gitignore"
+    if not gitignore_src.is_file() or ".env" not in gitignore_src.read_text(
+            encoding="utf-8").splitlines():
+        raise NewrEnvError(
+            "the starter-bot template's .gitignore does not list .env; "
+            "refusing to create a project whose token could be committed")
+    _atomic_copytree(src, target)
+    env_example = target / ".env.example"
+    env_file = target / ".env"
+    if env_example.is_file():
+        text = env_example.read_text(encoding="utf-8")
+        if token:
+            text = _set_env_value(text, "DISCORD_TOKEN", token)
+        if guild_id:
+            text = _set_env_value(text, "TEST_GUILD_ID", guild_id)
+        env_file.write_text(text, encoding="utf-8")
+    try:
+        abs_target = target if target.is_absolute() else Path.cwd() / target
+        display = "./" + str(abs_target.relative_to(Path.cwd()))
+    except ValueError:
+        display = str(target)
+    skills_installed: list = []
+    if install_skills:
+        table = agent_table(registry)
+        if skills_opt == "all":
+            skill_names = [p["name"] for p in registry.get("packages", [])
+                           if p["type"] == "skill"]
+        else:
+            skill_names = list(INIT_MINIMAL_SKILLS)
+        pkgs = packages(registry)
+        wanted = [pkgs[n] for n in skill_names if n in pkgs]
+        if specs:
+            agents = []
+            for spec in specs:
+                agents.extend(resolve_agent_spec(spec, table))
+            agents = list(dict.fromkeys(agents))
+            if not agents:
+                raise NewrUsageError("no agent detected on this machine. "
+                                     "Pick one explicitly: newr init --agent claude-code")
+            results = install_to_agents(wanted, source_root, table, agents, project, False)
+        elif project:
+            base = target / ".agents" / "skills"
+            results = [install_one(p, source_root, base / p["name"], False)
+                       for p in wanted]
+        else:
+            agents = detect_agents(table)
+            if not agents:
+                warn("warning: no agent detected; skills not installed "
+                     "(run `newr install --agent <name> <skill>` later)")
+                results = []
+            else:
+                results = install_to_agents(wanted, source_root, table,
+                                            agents, False, False)
+        for r in results:
+            if r.get("kind") == "conventions":
+                out(format_conventions_result(r))
+            else:
+                out(format_install_result(r))
+        skills_installed = [r["name"] for r in results
+                            if r.get("status") == "installed"
+                            and r.get("kind") != "conventions"]
+    out("")
+    out("Created %s/" % display)
+    out("  bot.py  config.py  db.py  cogs/  tests/  requirements.txt")
+    out("  .env  .env.example  .gitignore  README.md")
+    if skills_installed:
+        out("  Skills installed: %s" % ", ".join(skills_installed))
+    out("")
+    out("Next steps:")
+    out("  cd %s" % (display[2:] if display.startswith("./") else display))
+    out("  python -m venv .venv && source .venv/bin/activate")
+    out("  pip install -r requirements.txt")
+    if not token:
+        out("  Edit .env and put your bot token in DISCORD_TOKEN first "
+            "(get one at https://discord.com/developers/applications).")
+    out("  python bot.py")
+    return {"path": display, "bot_name": name, "skills_installed": skills_installed}
+
+
+SKILL_BOILERPLATE = """---
+name: {name}
+description: "{description}"
+license: MIT
+compatibility: "discord.py 2.x, Python 3.10+, no paid services"
+metadata:
+  version: "{version}"
+  author: "drewdestar"
+---
+
+# {title}
+
+{description}
+
+## What this skill never does
+
+- (Fill in: what is out of scope for this skill.)
+
+## Checklist
+
+- [ ] (Fill in: the checks that prove this skill worked.)
+"""
+
+
+def cmd_add(args: list) -> dict:
+    """Scaffold a new skill: boilerplate SKILL.md + a registry entry.
+
+    Runs against a local checkout of the repo (NEWR_LOCAL_SOURCE or
+    the directory this script lives in). Category grouping and isNew
+    flags are deferred."""
+    description = None
+    name = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--description" and i + 1 < len(args):
+            description = args[i + 1]
+            i += 2
+        elif arg.startswith("--description="):
+            description = arg[len("--description="):]
+            i += 1
+        elif arg.startswith("--"):
+            raise NewrUsageError("unknown flag for add: %s" % arg)
+        elif name is None:
+            name = arg
+            i += 1
+        else:
+            raise NewrUsageError("usage: newr add <skill-name> [--description <text>]")
+    if not name:
+        raise NewrUsageError("usage: newr add <skill-name> [--description <text>]")
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+        raise NewrUsageError(
+            "skill name must be lowercase letters, digits, and hyphens, got %r" % name)
+    if description is None:
+        if JSON_MODE:
+            raise NewrUsageError("add needs --description in --json mode")
+        try:
+            description = input(
+                "Description (one line, shown in search and the README table): "
+            ).strip()
+        except EOFError:
+            raise NewrUsageError("add was cancelled (no input)")
+    if not description:
+        raise NewrUsageError("add needs a description (--description <text>)")
+    source = local_source()
+    if source is None:
+        raise NewrEnvError(
+            "newr add needs a local checkout of the repo (set NEWR_LOCAL_SOURCE "
+            "to a directory containing registry.json)")
+    skill_dir = source / "skills" / name
+    if skill_dir.exists():
+        raise NewrUsageError("skill %s already exists at %s" % (name, skill_dir))
+    registry_path = source / "registry.json"
+    registry = _read_json_file(registry_path, "registry file")
+    if name in packages(registry):
+        raise NewrUsageError("registry already has a package named %r" % name)
+    skill_dir.mkdir(parents=True)
+    title = " ".join(word.capitalize() for word in name.split("-"))
+    safe_description = description.replace("\\", "\\\\").replace('"', '\\"')
+    (skill_dir / "SKILL.md").write_text(
+        SKILL_BOILERPLATE.format(
+            name=name, description=safe_description,
+            version=registry.get("version", VERSION), title=title),
+        encoding="utf-8")
+    entry = {"name": name, "type": "skill",
+             "version": registry.get("version", VERSION),
+             "description": description, "path": "skills/" + name}
+    pkgs = registry.setdefault("packages", [])
+    # Keep the starter-bot template last.
+    idx = next((k for k, p in enumerate(pkgs) if p.get("type") == "template"),
+               len(pkgs))
+    pkgs.insert(idx, entry)
+    # registry.json is compact + sorted + trailing newline; keep it that
+    # way so the diff is the new entry, not a reformat.
+    registry_path.write_text(
+        json.dumps(registry, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8")
+    out("added skill %s -> %s" % (name, skill_dir))
+    out("  registry entry added (version %s); edit skills/%s/SKILL.md next."
+        % (entry["version"], name))
+    return {"name": name, "path": "skills/" + name, "registry": str(registry_path)}
 
 
 HELP = """newr - the package manager for the discord-py-skills pack
 
-Usage: newr <command> [args]
+Usage: newr [--json] <command> [args]
 
   search [query]    list installable packages (skills and templates)
   info <package>    show a package's details and install state
-  install <pkg>...  install packages; `all` installs the seven skills
+  install <pkg>...  install packages; `all` installs the twelve skills
                     options: --target <dir>, --force,
                              --agent <name>[,<name>...] | --agent all | --agent auto,
                              --project (install into the project, not $HOME)
   uninstall <pkg>.. remove installed skills (also: --agent <name> [--project])
   list [--agent ..] show installed skills (default dir, or an agent's dir)
   agents            list supported agents, their skill dirs, and detection
-  update            refresh the registry and update installed skills
+  update [--check]  refresh the registry and update installed skills
+                    (--check prints the verdict without changing anything)
+  init              scaffold a starter bot (prompts for name, token, guild id)
+                    options: --yes, --name <name>, --dir <path>, --guild-id <id>,
+                             --skills <all|minimal|none>, --force
+  add <skill>       scaffold a new skill (SKILL.md boilerplate + registry entry)
   build <file.newr> build a .newr bot into runnable discord.py
                     options: --check, -o/--output <file.py>
   version           print the newr version
   help [command]    show this help, or help for one command
 
+Global flags:
+  --json             machine-readable output: stdout is exactly one JSON
+                     object, logs and warnings go to stderr, prompts are disabled.
+
 Skills install to ~/.newr/skills/<name> (NEWR_HOME overrides the
 prefix). Templates install into the current directory. No account,
 no token, no build step.
+
+Exit codes: 0 success; 1 usage error (bad command, flags, or package
+name); 2 environment error (Python older than 3.10, bad NEWR_LOCAL_SOURCE);
+3 network error (registry, tarball, or release lookup failed); 4 build
+error (newr build: bad .newr file). With --json, stdout is one JSON
+object and the error object carries the same code as a word
+(usage/environment/network/build).
+
+Offline / local clone: set NEWR_LOCAL_SOURCE to a checkout of the repo
+(a directory containing registry.json) and newr installs from it with
+no network access. Without it, newr fetches the registry and tarball
+from GitHub — from the latest release when one is known, else main.
 
 Agents: claude-code, codex, cursor, windsurf, copilot, gemini,
 opencode, kilo, cline, zed, qwen, kimi, kiro, junie, roo, continue,
@@ -1193,9 +2140,9 @@ skill directories and detection.
 """
 
 
-def cmd_help(args: list) -> int:
-    print(HELP, end="")
-    return 0
+def cmd_help(args: list) -> dict:
+    out(HELP, end="")
+    return {"help": HELP}
 
 
 COMMANDS = {
@@ -1206,27 +2153,66 @@ COMMANDS = {
     "list": cmd_list,
     "agents": cmd_agents,
     "update": cmd_update,
+    "init": cmd_init,
+    "add": cmd_add,
     "build": cmd_build,
     "version": cmd_version,
     "help": cmd_help,
 }
 
 
+def _envelope(command: str, data: dict | None, error: NewrError | None) -> dict:
+    """The --json envelope: one JSON object, success or failure."""
+    return {
+        "ok": error is None,
+        "command": command,
+        "newr": VERSION,
+        "data": data,
+        "warnings": list(WARNINGS),
+        "error": None if error is None else {
+            "code": error.code,
+            "message": str(error),
+            "hint": error.hint or "",
+        },
+    }
+
+
 def main(argv: list) -> int:
+    global JSON_MODE
+    argv = list(argv)
+    if "--json" in argv:
+        JSON_MODE = True
+        argv = [a for a in argv if a != "--json"]
     if not argv or argv[0] in ("-h", "--help"):
-        return cmd_help([])
+        data = cmd_help([])
+        if JSON_MODE:
+            emit(_envelope("help", data, None))
+        return 0
     cmd = argv[0]
     if cmd in ("-v", "--version"):
-        return cmd_version([])
+        data = cmd_version([])
+        if JSON_MODE:
+            emit(_envelope("version", data, None))
+        return 0
     fn = COMMANDS.get(cmd)
     if fn is None:
-        print("newr: unknown command '%s'. Run `newr help`." % cmd, file=sys.stderr)
-        return 2
-    try:
-        return fn(argv[1:])
-    except NewrError as exc:
-        print("newr: %s" % exc, file=sys.stderr)
+        err = NewrUsageError("unknown command '%s'. Run `newr help`." % cmd)
+        if JSON_MODE:
+            emit(_envelope(cmd, None, err))
+        else:
+            print("newr: %s" % err, file=sys.stderr)
         return 1
+    try:
+        data = fn(argv[1:])
+    except NewrError as exc:
+        if JSON_MODE:
+            emit(_envelope(cmd, None, exc))
+        else:
+            print("newr: %s" % exc, file=sys.stderr)
+        return _EXIT_CODES.get(exc.code, 1)
+    if JSON_MODE:
+        emit(_envelope(cmd, data, None))
+    return 0
 
 
 if __name__ == "__main__":
