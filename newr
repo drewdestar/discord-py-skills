@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""newr - the package manager for the discord-py-skills pack.
+
+Install agent skills for building discord.py bots the way Homebrew
+installs formulae:
+
+    newr search              list every installable package
+    newr install slash-commands
+    newr install all         install all six skills
+    newr install starter-bot install the runnable starter bot into ./starter-bot
+    newr list                show installed skills
+    newr update              refresh the registry and update installed skills
+    newr uninstall testing
+
+Skills install to ~/.newr/skills/<name> by default (NEWR_HOME overrides
+the prefix). Templates install into the current directory unless
+--target is given. Everything is fetched from the public repo at
+https://github.com/drewdestar/discord-py-skills; no account, no token,
+no build step. Python 3.9+ and the standard library only.
+"""
+
+import json
+import os
+import shutil
+import sys
+import tarfile
+import tempfile
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+VERSION = "0.2.0"
+REPO = "drewdestar/discord-py-skills"
+REGISTRY_URL = "https://raw.githubusercontent.com/" + REPO + "/main/registry.json"
+TARBALL_URL = "https://codeload.github.com/" + REPO + "/tarball/refs/heads/main"
+RECEIPT = ".newr.json"
+
+
+class NewrError(Exception):
+    """A user-facing failure: print the message, exit 1."""
+
+
+def home() -> Path:
+    return Path(os.environ.get("NEWR_HOME", str(Path.home() / ".newr")))
+
+
+def skills_dir() -> Path:
+    return home() / "skills"
+
+
+def registry_cache() -> Path:
+    return home() / "registry.json"
+
+
+def local_source() -> Path | None:
+    """A local checkout of the repo, if one is available.
+
+    NEWR_LOCAL_SOURCE wins. Otherwise, if this script lives in a
+    directory that contains registry.json (a clone of the repo),
+    that directory is the source. An installed copy in ~/.newr/bin
+    has no registry.json next to it, so it uses the network.
+    """
+    env = os.environ.get("NEWR_LOCAL_SOURCE")
+    if env:
+        path = Path(env)
+        if (path / "registry.json").is_file():
+            return path
+        raise NewrError("NEWR_LOCAL_SOURCE %s has no registry.json" % env)
+    here = Path(__file__).resolve().parent
+    if (here / "registry.json").is_file():
+        return here
+    return None
+
+
+def fetch_url(url: str, dest: Path) -> None:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "newr/" + VERSION})
+        with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
+            shutil.copyfileobj(resp, f)
+    except Exception as exc:  # network, DNS, HTTP errors: one clean message
+        raise NewrError("could not fetch %s (%s)" % (url, exc))
+
+
+def load_registry(refresh: bool = False) -> dict:
+    """The package registry: local checkout, else the cached copy,
+    else a fresh download. A failed download falls back to the cache
+    with a warning instead of dying."""
+    source = local_source()
+    if source is not None:
+        return json.loads((source / "registry.json").read_text(encoding="utf-8"))
+    cache = registry_cache()
+    if refresh or not cache.is_file():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(".tmp")
+        try:
+            fetch_url(os.environ.get("NEWR_REGISTRY_URL", REGISTRY_URL), tmp)
+        except NewrError:
+            if cache.is_file():
+                print("warning: registry download failed, using cached copy", file=sys.stderr)
+                return json.loads(cache.read_text(encoding="utf-8"))
+            raise
+        tmp.replace(cache)
+    return json.loads(cache.read_text(encoding="utf-8"))
+
+
+def packages(registry: dict) -> dict:
+    return {p["name"]: p for p in registry.get("packages", [])}
+
+
+def resolve(name: str, registry: dict) -> dict:
+    """One package by name. 'all' and the repo name mean every skill."""
+    if name in ("all", "discord-py-skills"):
+        return {"name": "all", "type": "bundle", "version": registry.get("version", "?"),
+                "description": "all six skills", "path": ""}
+    found = packages(registry).get(name)
+    if found is None:
+        raise NewrError("no package named '%s'. Run `newr search` to see what exists." % name)
+    return found
+
+
+def package_source(registry: dict) -> Path:
+    """A directory tree holding the repo contents: the local checkout,
+    or a freshly downloaded tarball (caller owns the temp dir)."""
+    source = local_source()
+    if source is not None:
+        return source
+    tmp = Path(tempfile.mkdtemp(prefix="newr-"))
+    archive = tmp / "repo.tar.gz"
+    fetch_url(os.environ.get("NEWR_TARBALL_URL", TARBALL_URL), archive)
+    try:
+        with tarfile.open(archive, "r:gz") as tf:
+            tf.extractall(tmp)
+    except Exception as exc:
+        raise NewrError("could not unpack the repo archive (%s)" % exc)
+    roots = [d for d in tmp.iterdir() if d.is_dir()]
+    if not roots:
+        raise NewrError("downloaded repo archive is empty")
+    return roots[0]
+
+
+def dest_for(pkg: dict, target: Path | None) -> Path:
+    if target is not None:
+        return target
+    if pkg["type"] == "template":
+        return Path.cwd() / pkg["name"]
+    return skills_dir() / pkg["name"]
+
+
+def installed_receipt(pkg_name: str) -> dict | None:
+    receipt = skills_dir() / pkg_name / RECEIPT
+    if receipt.is_file():
+        return json.loads(receipt.read_text(encoding="utf-8"))
+    return None
+
+
+def install_one(pkg: dict, source_root: Path, target: Path | None, force: bool) -> str:
+    dest = dest_for(pkg, target)
+    receipt = installed_receipt(pkg["name"])
+    if receipt and receipt.get("version") == pkg["version"] and not force and target is None:
+        return "already installed: %s %s" % (pkg["name"], pkg["version"])
+    src = source_root / pkg["path"]
+    if not src.is_dir():
+        raise NewrError("package %s is missing from the source (%s)" % (pkg["name"], pkg["path"]))
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+    (dest / RECEIPT).write_text(json.dumps({
+        "name": pkg["name"],
+        "type": pkg["type"],
+        "version": pkg["version"],
+        "source": REPO,
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+    }, indent=2), encoding="utf-8")
+    return "installed %s %s -> %s" % (pkg["name"], pkg["version"], dest)
+
+
+def cmd_search(args: list) -> int:
+    registry = load_registry()
+    query = " ".join(args).lower() if args else ""
+    rows = [p for p in registry.get("packages", [])
+            if not query or query in p["name"].lower() or query in p["description"].lower()]
+    if not rows:
+        print("no packages match '%s'" % query)
+        return 0
+    for p in rows:
+        installed = installed_receipt(p["name"])
+        mark = " [installed %s]" % installed["version"] if installed else ""
+        print("%-20s %-8s %s%s" % (p["name"], p["type"], p["description"], mark))
+    return 0
+
+
+def cmd_info(args: list) -> int:
+    if len(args) != 1:
+        raise NewrError("usage: newr info <package>")
+    registry = load_registry()
+    pkg = resolve(args[0], registry)
+    if pkg["type"] == "bundle":
+        print("all: the six skills in the discord-py-skills pack")
+        return 0
+    print("name:        %s" % pkg["name"])
+    print("type:        %s" % pkg["type"])
+    print("version:     %s" % pkg["version"])
+    print("description: %s" % pkg["description"])
+    print("path:        %s" % pkg["path"])
+    receipt = installed_receipt(pkg["name"])
+    if receipt:
+        print("installed:   %s (%s)" % (receipt["version"], receipt["installed_at"]))
+    else:
+        print("installed:   no")
+    return 0
+
+def cmd_install(args: list) -> int:
+    force = "--force" in args
+    target = None
+    names = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--force":
+            i += 1
+        elif args[i] == "--target" and i + 1 < len(args):
+            target = Path(args[i + 1])
+            i += 2
+        elif args[i].startswith("--target="):
+            target = Path(args[i][len("--target="):])
+            i += 1
+        else:
+            names.append(args[i])
+            i += 1
+    if not names:
+        raise NewrError("usage: newr install <package>... | newr install all")
+    if target is not None and len(names) > 1:
+        raise NewrError("--target installs one package at a time")
+    registry = load_registry()
+    wanted = []
+    for name in names:
+        pkg = resolve(name, registry)
+        if pkg["type"] == "bundle":
+            wanted.extend(p for p in registry.get("packages", []) if p["type"] == "skill")
+        else:
+            wanted.append(pkg)
+    seen = set()
+    wanted = [p for p in wanted if not (p["name"] in seen or seen.add(p["name"]))]
+    source_root = package_source(registry)
+    for pkg in wanted:
+        print(install_one(pkg, source_root, target, force))
+    return 0
+
+
+def cmd_uninstall(args: list) -> int:
+    if not args:
+        raise NewrError("usage: newr uninstall <package>...")
+    for name in args:
+        dest = skills_dir() / name
+        if dest.is_dir():
+            shutil.rmtree(dest)
+            print("uninstalled %s" % name)
+        else:
+            print("not installed: %s" % name)
+    return 0
+
+
+def cmd_list(args: list) -> int:
+    if not skills_dir().is_dir():
+        print("nothing installed yet. Run `newr search`, then `newr install <package>`.")
+        return 0
+    found = False
+    for child in sorted(skills_dir().iterdir()):
+        if not child.is_dir():
+            continue
+        receipt = installed_receipt(child.name)
+        if receipt:
+            print("%-20s %-8s %s" % (receipt["name"], receipt["version"], child))
+            found = True
+    if not found:
+        print("nothing installed yet. Run `newr search`, then `newr install <package>`.")
+    return 0
+
+
+def cmd_update(args: list) -> int:
+    registry = load_registry(refresh=True)
+    print("registry %s" % registry.get("version", "?"))
+    wanted = []
+    for child in sorted(skills_dir().iterdir()) if skills_dir().is_dir() else []:
+        if not child.is_dir():
+            continue
+        receipt = installed_receipt(child.name)
+        if not receipt:
+            continue
+        pkg = packages(registry).get(child.name)
+        if pkg and pkg["version"] != receipt.get("version"):
+            wanted.append(pkg)
+    if not wanted:
+        print("everything is up to date")
+        return 0
+    source_root = package_source(registry)
+    for pkg in wanted:
+        print(install_one(pkg, source_root, None, force=True))
+    return 0
+
+
+def cmd_version(args: list) -> int:
+    print("newr %s" % VERSION)
+    return 0
+
+
+HELP = """newr - the package manager for the discord-py-skills pack
+
+Usage: newr <command> [args]
+
+  search [query]    list installable packages (skills and templates)
+  info <package>    show a package's details and install state
+  install <pkg>...  install packages; `all` installs the six skills
+                    options: --target <dir>, --force
+  uninstall <pkg>.. remove installed skills
+  list              show installed skills
+  update            refresh the registry and update installed skills
+  version           print the newr version
+  help [command]    show this help, or help for one command
+
+Skills install to ~/.newr/skills/<name> (NEWR_HOME overrides the
+prefix). Templates install into the current directory. No account,
+no token, no build step.
+"""
+
+
+def cmd_help(args: list) -> int:
+    print(HELP, end="")
+    return 0
+
+
+COMMANDS = {
+    "search": cmd_search,
+    "info": cmd_info,
+    "install": cmd_install,
+    "uninstall": cmd_uninstall,
+    "list": cmd_list,
+    "update": cmd_update,
+    "version": cmd_version,
+    "help": cmd_help,
+}
+
+
+def main(argv: list) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        return cmd_help([])
+    cmd = argv[0]
+    if cmd in ("-v", "--version"):
+        return cmd_version([])
+    fn = COMMANDS.get(cmd)
+    if fn is None:
+        print("newr: unknown command '%s'. Run `newr help`." % cmd, file=sys.stderr)
+        return 2
+    try:
+        return fn(argv[1:])
+    except NewrError as exc:
+        print("newr: %s" % exc, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

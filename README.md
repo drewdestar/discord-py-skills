@@ -6,7 +6,34 @@ patterns that keep a real bot running: correct intents, slash commands
 that answer errors, a SQLite economy that cannot create money, honest
 i18n, and deploys that restart themselves.
 
-## Install
+## Install with newr (like Homebrew)
+
+`newr` is the package manager for this pack. Install it once, then
+install skills by name:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/drewdestar/discord-py-skills/main/install.sh | sh
+newr search
+newr install slash-commands
+newr install all               # all six skills
+newr install starter-bot       # runnable starter bot into ./starter-bot
+```
+
+| Command | What it does |
+|---|---|
+| `newr search [query]` | List installable packages |
+| `newr info <package>` | Show a package's details and install state |
+| `newr install <pkg>...` | Install packages (`all` = the six skills) |
+| `newr uninstall <pkg>...` | Remove installed skills |
+| `newr list` | Show installed skills |
+| `newr update` | Refresh the registry and update installed skills |
+| `newr version` | Print the newr version |
+
+Skills install to `~/.newr/skills/<name>` (`NEWR_HOME` overrides the
+prefix). Templates install into the current directory. No account, no
+token, no build step. `newr` is one Python file, standard library only.
+
+## Install by hand
 
 Copy the `skills/` folder into your agent's skills directory.
 
@@ -75,12 +102,12 @@ change in a ledger inside one atomic transaction. See
 ## Starter bot
 
 `templates/starter-bot/` is a minimal working bot (`/ping`, `/balance`)
-with a SQLite economy and a passing test suite. Copy it to start a real
-project:
+with a SQLite economy and a passing test suite. Install it with newr,
+or copy it to start a real project:
 
 ```bash
-cp -r templates/starter-bot my-bot
-cd my-bot
+newr install starter-bot
+cd starter-bot
 pip install -r requirements.txt
 cp .env.example .env   # put your real token in .env
 python bot.py
@@ -130,7 +157,8 @@ MIT. See [LICENSE](LICENSE).
 Paket skill agen dan starter kit produksi untuk membuat bot Discord
 dengan discord.py. Setiap skill mengajari agen AI satu pekerjaan:
 scaffolding bot, slash command, ekonomi SQLite yang aman, i18n,
-deploy dan monitoring, serta testing. Salin folder `skills/` ke
+deploy dan monitoring, serta testing. Pasang dengan `newr` (lihat
+bagian Install with newr di atas), atau salin folder `skills/` ke
 direktori skill agen kamu, lalu minta agen membangun bot. Contoh bot
 yang berjalan ada di daftar di atas. Starter bot lengkap dengan tes
 ada di `templates/starter-bot/`.
