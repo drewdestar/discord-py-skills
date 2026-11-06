@@ -4,7 +4,7 @@ description: "Ship a multi-language discord.py bot: per-user locale preference, 
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, no paid services"
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   author: "drewdestar"
 ---
 
@@ -15,7 +15,7 @@ A bot that answers in the wrong language is worse than a bot that answers in Eng
 ## How Discord locales work
 
 - Every interaction carries `interaction.locale`, the user's Discord client language (for example `id`, `en-US`, `ja`).
-- discord.py resolves command names and descriptions through an `app_commands.Translator`. Subclass it, implement `translate()`, and set `bot.tree.translator`.
+- discord.py resolves command names and descriptions through an `app_commands.Translator`. Subclass it, implement `translate()`, and install it with `await bot.tree.set_translator(...)` before syncing. `bot.tree.translator` is a read-only property — assigning to it raises `AttributeError`.
 - Command names and descriptions can have per-locale strings. The user sees the command in their own language; the bot still receives the same command object.
 
 ## Store one preference per user
@@ -42,12 +42,14 @@ Every string lookup follows this order, and stops at the first hit:
 
 ```python
 STRINGS = {
-    "en": {"shop.buy.success": "Bought {item} for {price} gold."},
-    "id": {"shop.buy.success": "Membeli {item} seharga {price} gold."},
+    "en": {"shop.buy.success": "Bought {item} for {price} gold.",
+           "language.set": "Language set to English."},
+    "id": {"shop.buy.success": "Membeli {item} seharga {price} gold.",
+           "language.set": "Bahasa diatur ke Indonesia."},
 }
 
 def t(locale: str, key: str, **kwargs: object) -> str:
-    text = STRINGS.get(locale, {}).get(key) or STRINGS["en"].get(key) or key
+    text = STRINGS.get(locale, {}).get(key) or STRINGS.get("en", {}).get(key) or key
     return text.format(**kwargs)
 ```
 
@@ -72,7 +74,7 @@ def validate_table(table: dict[str, dict[str, str]]) -> list[str]:
     errors = []
     for locale, strings in table.items():
         for key, text in strings.items():
-            source = table["en"].get(key)
+            source = table.get("en", {}).get(key)
             if source is None:
                 errors.append(f"{locale}:{key} has no English source")
                 continue
@@ -87,13 +89,53 @@ def validate_table(table: dict[str, dict[str, str]]) -> list[str]:
 
 ## Translator for command names
 
+Command descriptions only reach `translate()` when they are defined with `locale_str` keys. A plain English string is never translated — the translator receives the key, not the text:
+
 ```python
+from discord import app_commands
+
+@app_commands.command(
+    name="shop",
+    description=app_commands.locale_str("shop.description"))
+async def shop(interaction: discord.Interaction) -> None:
+    ...
+
 class AppTranslator(app_commands.Translator):
     async def translate(self, string: app_commands.locale_str, locale: discord.Locale, context) -> str | None:
-        return STRINGS.get(locale.value, {}).get(string.message)
+        lang = locale.value.split("-")[0]  # 'en-US' -> 'en'
+        return STRINGS.get(lang, {}).get(string.message)
+```
+
+Install it before syncing:
+
+```python
+await bot.tree.set_translator(AppTranslator())
+await bot.tree.sync()
 ```
 
 - Return `None` when no translation exists; discord.py falls back to the source string. Returning the key or an empty string is worse than falling back.
+
+## The `/language` command
+
+```python
+@app_commands.command(name="language", description="Set your reply language.")
+@app_commands.describe(locale="Language code, for example id or en")
+async def language(interaction: discord.Interaction, locale: str) -> None:
+    if locale not in STRINGS:
+        await interaction.response.send_message(
+            "Unknown language: %s. Available: %s"
+            % (locale, ", ".join(sorted(STRINGS))), ephemeral=True)
+        return
+    await db.execute(
+        "INSERT INTO users (user_id, locale) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET locale = excluded.locale",
+        (interaction.user.id, locale))
+    await db.commit()
+    await interaction.response.send_message(
+        t(locale, "language.set"), ephemeral=True)
+```
+
+- `db` is the bot's one `aiosqlite` connection (see economy-database). The preference lives in the same `users` table `get_locale` reads, so the next reply uses it immediately.
 
 ## Verify live
 

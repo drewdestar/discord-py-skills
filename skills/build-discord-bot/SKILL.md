@@ -4,7 +4,7 @@ description: "Build a production discord.py bot from scratch: intents, cogs, asy
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, no paid services"
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   author: "drewdestar"
 ---
 
@@ -31,53 +31,19 @@ One file per feature. A cog that passes 400 lines is a sign it holds two feature
 
 ## Entry point
 
-```python
-import asyncio
-import logging
-import discord
-from discord.ext import commands
+The entry point: intents, `setup_hook`, cog loading, sync, and the token from config. See `references/entry-point.md`.
 
-import config
+## First command
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-
-log = logging.getLogger("bot")
-
-class Bot(commands.Bot):
-    async def setup_hook(self) -> None:
-        # setup_hook runs before the bot connects. Load cogs here,
-        # not in on_ready (on_ready can fire more than once).
-        for cog in ("cogs.general",):
-            await self.load_extension(cog)
-        log.info("Cogs loaded.")
-
-    async def on_ready(self) -> None:
-        log.info("Logged in as %s (%s)", self.user, self.user.id)
-
-def main() -> None:
-    intents = discord.Intents.default()
-    intents.message_content = True  # only if the bot reads message text
-    bot = Bot(command_prefix="!", intents=intents)
-    bot.run(config.DISCORD_TOKEN)
-
-if __name__ == "__main__":
-    main()
-```
-
-Rules that matter:
-
-- Load extensions in `setup_hook`, never in `on_ready`. `on_ready` can fire again after a reconnect, and loading the same cog twice raises an error.
-- Pass the token to `bot.run()` from config, never as a literal string in the code.
-- `message_content` is a privileged intent. Enable it in the Developer Portal only if the bot actually reads message text. Slash-command-only bots do not need it.
-- Keep `bot.py` free of feature code. If a helper is needed by two cogs, it belongs in its own module, not in `bot.py`.
+The first command (`/ping`) and the error handler that answers the user. See `references/first-command.md`.
 
 ## Config from the environment
 
 ```python
 import os
+from dotenv import load_dotenv
+
+load_dotenv()  # local development only; production sets real env vars
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]  # KeyError on startup if missing
 TEST_GUILD_ID = int(os.environ.get("TEST_GUILD_ID", "0") or 0)
@@ -109,9 +75,9 @@ it is wrong, no matter how confident it looks:
 | `discord.Client(command_prefix="!")` | `commands.Bot(command_prefix="!")` |
 | `command_prefix="/"` to make slash commands | Slash commands are `app_commands` and must be synced; a prefix is not a slash command |
 
-Pin the version: `discord.py>=2.5` in requirements, and check the
+Pin the version: `discord.py>=2.7.1` in requirements, and check the
 installed version with `pip show discord.py` before trusting any
-API you are unsure of. The starter bot pins a known-good version.
+API you are unsure of. The starter bot requires `discord.py>=2.7.1` (Components V2 needs 2.6.0+, and this pack was live-verified against 2.7.1).
 
 ## on_message is a gate, not a hook
 

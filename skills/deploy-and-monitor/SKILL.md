@@ -4,7 +4,7 @@ description: "Run a discord.py bot 24/7: systemd service, watchdog restarts, log
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, systemd, no paid services"
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   author: "drewdestar"
 ---
 
@@ -20,10 +20,9 @@ laptop and closing the lid, on a free REPL that sleeps, or with
 `nohup python bot.py &` and no supervisor. A deploy is not done
 until all three exist:
 
-1. A supervisor that restarts the process (systemd `Restart=always`
-   above, or a Docker `restart: unless-stopped` policy).
+1. A supervisor that restarts the process (systemd `Restart=always`, see `references/systemd-service.md`, or a Docker `restart: unless-stopped` policy).
 2. A watchdog that restarts a process that is alive but stuck
-   (heartbeat file, above).
+   (heartbeat file, see `Watchdog` below).
 3. A health check probed from outside the bot (uptime monitor or
    cron hitting `/health`).
 
@@ -47,31 +46,7 @@ already copied.
 
 ## systemd service
 
-```ini
-[Unit]
-Description=My Discord Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=bot
-WorkingDirectory=/opt/bots/mybot
-EnvironmentFile=/opt/bots/mybot/.env
-ExecStart=/opt/bots/mybot/.venv/bin/python bot.py
-Restart=always
-RestartSec=10
-StandardOutput=append:/var/log/mybot/bot.log
-StandardError=append:/var/log/mybot/bot.log
-
-[Install]
-WantedBy=multi-user.target
-```
-
-- `Restart=always` with a 10 second delay is the whole uptime story. A crash becomes a 10 second blip, not an outage.
-- `EnvironmentFile` holds the token. The file is owned by the bot user with mode `600`. A token in the unit file itself or in a world-readable file is a leaked token.
-- `WorkingDirectory` matters: relative paths for the database, cogs, and logs all resolve from here. A wrong working directory is the most common "works on my machine" deployment bug.
-- Enable with `systemctl enable --now mybot` and check with `systemctl status mybot`.
+The systemd unit: `Restart=always`, the 1,000 IDENTIFY-per-day budget, and the four prerequisites. See `references/systemd-service.md`.
 
 ## Watchdog: a second pair of eyes
 
@@ -94,10 +69,12 @@ fi
 - The bot touches the heartbeat file every 60 seconds from inside its event loop (a `tasks.loop` that writes the current timestamp). If the loop stops running, the heartbeat goes stale, and the watchdog restarts the service.
 - The heartbeat proves the event loop is alive, not just the process. A process can be alive and completely wedged; the timestamp cannot lie about that.
 - Keep the watchdog simple and boring. It is the last line of defense; cleverness here is a liability.
+- `stat -c %Y` is GNU stat (Linux). On macOS the same check is `stat -f %m`. This skill is Linux/systemd; the watchdog as written does not run on macOS.
 
 ## Log rotation
 
 ```python
+import logging
 from logging.handlers import RotatingFileHandler
 
 handler = RotatingFileHandler(
@@ -118,7 +95,28 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 ## Safe restarts for updates
 
 1. `systemctl stop mybot` (or deploy to a staging copy first).
-2. Wait for in-flight database transactions to finish. With one writer and a lock, this is automatic once the loop stops accepting new work; give it a few seconds.
+2. Wait for in-flight database transactions to finish. This is **not** automatic: `systemctl stop` sends SIGTERM, and Python's default SIGTERM handler kills the process immediately — discord.py installs no graceful shutdown. Install a handler so the bot closes cleanly and the database connection is released before the process exits:
+
+```python
+import asyncio
+import signal
+
+def install_signal_handlers(bot, db=None) -> None:
+    """SIGTERM/SIGINT -> graceful close. Unix only (systemd/Linux)."""
+    loop = asyncio.get_running_loop()
+
+    async def _shutdown() -> None:
+        if db is not None:
+            await db.close()  # release the SQLite write lock first
+        await bot.close()  # stops the event loop and the Discord connection
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown()))
+
+# Call install_signal_handlers(bot, db) in setup_hook.
+```
+
+With the handler installed, `systemctl stop` waits for `bot.close()` to finish instead of killing mid-write. Without it, a stop during a transfer can leave the SQLite write lock held until the next start.
 3. Pull the new code, run the tests, then `systemctl start mybot`.
 4. Watch the first minute of logs: cogs loaded, login line, command sync result. If any of the three is missing, the deploy failed.
 

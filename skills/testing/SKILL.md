@@ -4,7 +4,7 @@ description: "Test a discord.py bot: unit tests for pure logic, mocked interacti
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, no paid services"
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
   author: "drewdestar"
 ---
 
@@ -29,6 +29,7 @@ Test only at these seams. Do not mock the internals of a function to test that f
 # pyproject.toml
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 ```
 
@@ -39,10 +40,10 @@ async tests will fail as unsupported.
 
 ```txt
 # requirements-dev.txt
-pytest
-pytest-asyncio
-discord.py
-aiosqlite
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+discord.py>=2.7.1
+aiosqlite==0.22.1
 ```
 
 - `asyncio_mode = "auto"` makes every `async def test_` function run without a decorator. One less thing to forget.
@@ -51,85 +52,60 @@ aiosqlite
 ## Pure logic first
 
 ```python
+import pytest
+
+
+def validate_transfer_amount(amount: int) -> None:
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+
 def test_transfer_rejects_zero_amount():
     with pytest.raises(ValueError):
         validate_transfer_amount(0)
 ```
 
-- Pure functions (validation, formatting, cooldown math) are the cheapest tests in the codebase and the most valuable: they never need a mock and they never flake.
+- `validate_transfer_amount` is the same rule the economy skill's `transfer` enforces; the test pins the rule, not the implementation. Pure functions (validation, formatting, cooldown math) are the cheapest tests in the codebase and the most valuable: they never need a mock and they never flake.
 - Expected values come from the spec or a worked example, never by recomputing the value the way the code does. A test that asserts `add(a, b) == a + b` passes by construction and can never catch a bug.
 
 ## Database tests
 
-```python
-async def test_transfer_is_atomic(tmp_path):
-    db = await connect(str(tmp_path / "test.db"))
-    await init_db(db)
-    await credit_once(db, asyncio.Lock(), 1, 100, "reward", "seed:1")
-    await transfer(db, asyncio.Lock(), 1, 2, 40)
-    assert await get_balance(db, 1) == 60
-    assert await get_balance(db, 2) == 40
-    with pytest.raises(ValueError, match="insufficient funds"):
-        await transfer(db, asyncio.Lock(), 1, 2, 1000)
-    assert await get_balance(db, 1) == 60  # failed transfer changed nothing
-    await db.close()
-```
-
-- Each test gets a fresh temporary database (`tmp_path`). Tests that share one database file order-depend on each other and fail in confusing ways.
-- The last two assertions are the point of the test: a failed transfer must leave both balances untouched. A test that only checks the happy path does not test atomicity.
+Database tests: a fresh database per test, the transfer test, and the failure case. See `references/database-tests.md`.
 
 ## Mocking an interaction
 
+Mocking an interaction: the ping sample, the cooldown test, and what `.callback()` bypasses. See `references/mocking-interaction.md`.
+
+## Wiring: cogs load
+
+A command test proves the callback works; it does not prove the
+cog loads. A wiring test loads the extension in a test bot
+through `setup_hook`, exactly as the starter's `bot.py:31-35`
+does:
+
 ```python
-from unittest.mock import AsyncMock, MagicMock
+import discord
+from discord.ext import commands
 
-def make_interaction(user_id: int = 1) -> MagicMock:
-    interaction = MagicMock(spec=discord.Interaction)
-    interaction.user = MagicMock()
-    interaction.user.id = user_id
-    interaction.response = AsyncMock()
-    interaction.followup = AsyncMock()
-    return interaction
 
-async def test_ping_answers():
-    cog = General(bot=MagicMock())
-    interaction = make_interaction()
-    await cog.ping.callback(cog, interaction)
-    interaction.response.send_message.assert_awaited_once()
-    text = interaction.response.send_message.await_args.args[0]
-    assert text.startswith("Pong!")
+class TestBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        await self.load_extension("cogs.general")
+
+
+async def test_cogs_load():
+    bot = TestBot(command_prefix="!", intents=discord.Intents.default())
+    await bot.setup_hook()
+    assert bot.get_cog("General") is not None
+    await bot.close()
 ```
 
-- Call the command callback directly: `cog.ping.callback(cog, interaction)`. This exercises the real command code with a fake interaction, no network involved.
-- Assert on what the user would see (the message text), not on internal calls. If the test asserts the bot called an internal helper, it breaks on every refactor.
-- `AsyncMock` for `response` and `followup`: `send_message` and `defer` are coroutines, and a plain `MagicMock` for them returns a non-awaitable that fails with a confusing error.
+No token, no login, no network — `setup_hook` runs the same
+`load_extension` calls the real bot runs at startup, so a cog
+that fails to import or register fails here first.
 
 ## Tests must be able to fail
 
-A test that cannot fail proves nothing. These are the ways tests
-written by an AI usually lie:
-
-- **Asserting what the code does, not what it should do.** Expected
-  values come from the spec or a worked example, never by
-  recomputing the value the way the code does. A test that asserts
-  `add(a, b) == a + b` passes by construction and can never catch
-  a bug.
-- **Asserting truthiness instead of values.** `assert result`
-  passes for any non-empty value. Assert the exact value:
-  `assert balance == 60`.
-- **Mocking the unit under test.** If the test mocks the function
-  it is testing, it tests the mock. Mock the boundary (Discord,
-  the database, the clock), never the code under test.
-- **Only testing the happy path.** Every command needs an error-path
-  test: `MissingPermissions`, `Forbidden`, an interaction timeout,
-  invalid input. A bot crashes on the paths nobody tested.
-- **Writing tests after the fix.** Write the failing test first,
-  watch it fail, then fix the code. A test written after the fix
-  often asserts the bug as correct behavior.
-
-Before trusting a suite, break something on purpose: change one
-expected value and confirm the test goes red. If it stays green,
-the test is decoration.
+Tests must be able to fail: the red check, and the vacuous-assertion trap. See `references/tests-must-fail.md`.
 
 ## What not to test
 
@@ -155,15 +131,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: python -m pytest -q
 ```
 
 - CI runs on every push and every pull request. A test suite that only runs on the developer's machine is a suggestion, not a gate.
+- Install the test tools explicitly (`pytest pytest-asyncio`). Do not install a `requirements-dev.txt` the project does not have — the install step fails on a file that does not exist. If the project does have one, install that instead.
+- Pin action majors to the latest at the time of writing (v7 for both checkout and setup-python, checked 2026-11-06). Re-check before copying: a stale major is a silent downgrade.
 
 ## Verify live
 
@@ -173,8 +151,8 @@ does not. After the suite passes:
 1. Run the bot against the test guild.
 2. Invoke every command the suite covers, once, in Discord.
 3. Trigger one error path in Discord (for example, a command the
-   user has no permission for). It must answer with the error
-   message, not silence.
+   user has no permission for, or an interaction that times out).
+   It must answer with the error message, not silence.
 4. Restart the bot. Balances and data survive the restart.
 
 Report the observed reply for each command. "Tests pass" is a

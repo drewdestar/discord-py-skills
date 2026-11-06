@@ -5,6 +5,7 @@
 CREATE TABLE IF NOT EXISTS users (
     user_id     INTEGER PRIMARY KEY,
     balance     INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
+    version     INTEGER NOT NULL DEFAULT 0,
     locale      TEXT NOT NULL DEFAULT 'en',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -13,7 +14,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL,
     amount      INTEGER NOT NULL,
-    kind        TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('daily', 'purchase', 'transfer', 'reward', 'correction')),
     idem_key    TEXT UNIQUE,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (user_id)
