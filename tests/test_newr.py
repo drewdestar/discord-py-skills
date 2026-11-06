@@ -31,6 +31,7 @@ def _load_newr_module():
     spec.loader.exec_module(mod)
     return mod
 SKILLS = ("using-discord-py-skills", "build-discord-bot", "slash-commands",
+          "design-with-hallmark",
           "economy-database", "i18n", "deploy-and-monitor", "testing")
 SPEC_FRONTMATTER_FIELDS = {"name", "description", "license",
                            "compatibility", "metadata", "allowed-tools"}
@@ -60,10 +61,36 @@ class NewrTest(unittest.TestCase):
         return proc
 
     def test_version_and_help(self):
-        self.assertIn("newr 0.4.0", self.newr("version").stdout)
+        self.assertIn("newr 0.5.0", self.newr("version").stdout)
         self.assertIn("install", self.newr("help").stdout)
         self.assertIn("--agent", self.newr("help").stdout)
-        self.assertEqual(self.newr("bogus-command").returncode, 2)
+        # Unknown command is a usage error (exit 1), not an
+        # environment error: it moved 2 -> 1 when exit codes were typed.
+        self.assertEqual(self.newr("bogus-command").returncode, 1)
+
+    def test_json_flag_stdout_is_one_json_object(self):
+        # NW-01: in --json mode stdout is exactly one JSON object with
+        # the fixed envelope; logs and warnings go to stderr, never stdout.
+        for args in (["search"], ["list"], ["version"]):
+            proc = self.newr("--json", *args)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            parsed = json.loads(proc.stdout)
+            self.assertTrue(parsed["ok"])
+            self.assertEqual(
+                set(parsed),
+                {"ok", "command", "newr", "data", "warnings", "error"})
+            self.assertIsNone(parsed["error"])
+        # A failing command still yields exactly one JSON object,
+        # with ok=false and a typed error carrying a hint.
+        proc = self.newr("--json", "install", "slash-command")
+        self.assertEqual(proc.returncode, 1)
+        parsed = json.loads(proc.stdout)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["error"]["code"], "usage")
+        self.assertIn("Run `newr search`", parsed["error"]["hint"])
+        # --json works after the command too.
+        parsed = json.loads(self.newr("version", "--json").stdout)
+        self.assertTrue(parsed["ok"])
 
     def test_search_lists_all_packages(self):
         out = self.newr("search").stdout
@@ -72,8 +99,12 @@ class NewrTest(unittest.TestCase):
 
     def test_search_filters(self):
         out = self.newr("search", "economy").stdout
-        self.assertIn("economy-database", out)
-        self.assertNotIn("slash-commands", out)
+        # Compare package names (first token of each row), not raw text:
+        # descriptions cross-reference other skills by name, so a
+        # substring check would flag a mention, not a match.
+        names = [line.split()[0] for line in out.splitlines() if line.strip()]
+        self.assertIn("economy-database", names)
+        self.assertNotIn("slash-commands", names)
 
     def test_info_unknown_package(self):
         proc = self.newr("info", "no-such-skill")
@@ -87,7 +118,7 @@ class NewrTest(unittest.TestCase):
         self.assertTrue((dest / "SKILL.md").is_file())
         receipt = json.loads((dest / ".newr.json").read_text())
         self.assertEqual(receipt["name"], "slash-commands")
-        self.assertEqual(receipt["version"], "0.4.0")
+        self.assertEqual(receipt["version"], "0.5.0")
         # Byte-identical to the source skill.
         self.assertEqual(
             (dest / "SKILL.md").read_bytes(),
@@ -136,7 +167,7 @@ class NewrTest(unittest.TestCase):
         (dest / ".newr.json").write_text(json.dumps(receipt))
         proc = self.newr("update")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("installed i18n 0.4.0", proc.stdout)
+        self.assertIn("installed i18n 0.5.0", proc.stdout)
         self.assertIn("everything is up to date", self.newr("update").stdout)
 
     def test_install_unknown_package_fails_cleanly(self):
@@ -170,7 +201,7 @@ class NewrTest(unittest.TestCase):
         dest = self.home / ".claude" / "skills" / "testing"
         self.assertTrue((dest / "SKILL.md").is_file())
         receipt = json.loads((dest / ".newr.json").read_text())
-        self.assertEqual(receipt["version"], "0.4.0")
+        self.assertEqual(receipt["version"], "0.5.0")
         self.assertEqual(receipt["agent"], "claude-code")
         # The default dir is untouched by an agent install.
         self.assertFalse((self.home / "skills" / "testing").exists())
@@ -227,8 +258,13 @@ class NewrTest(unittest.TestCase):
     def test_install_agent_auto_detects_markers(self):
         # Fake installed agents with marker dirs. PATH is emptied so
         # no real binary on this machine (codex, opencode) is detected.
+        # A marker dir counts as detected only when it holds something
+        # newr did not create: a real install has settings or config
+        # files next to the skills dir, so the fixture writes one.
         (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "settings.json").write_text("{}")
         (self.home / ".cursor").mkdir()
+        (self.home / ".cursor" / "settings.json").write_text("{}")
         empty_bin = Path(self.tmp.name) / "emptybin"
         empty_bin.mkdir()
         env = dict(self.env)
@@ -238,6 +274,34 @@ class NewrTest(unittest.TestCase):
         self.assertTrue((self.home / ".claude" / "skills" / "testing" / "SKILL.md").is_file())
         self.assertTrue((self.home / ".cursor" / "skills" / "testing" / "SKILL.md").is_file())
         self.assertFalse((self.home / ".copilot" / "skills" / "testing").exists())
+
+    def test_install_agent_auto_ignores_newr_only_marker_dirs(self):
+        # The circularity fix: a marker dir holding only what newr
+        # itself creates (a skills dir) is NOT a detected agent.
+        # Installing skills must not create the marker detection looks
+        # for, or `newr agents` would claim agents that were never there.
+        def detected(output, name):
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == name:
+                    return parts[1] == "yes"
+            return False
+
+        empty_bin = Path(self.tmp.name) / "emptybin"
+        empty_bin.mkdir()
+        env = dict(self.env)
+        env["PATH"] = str(empty_bin)
+        proc = self.newr("install", "--agent", "claude-code", "testing", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # ~/.claude now holds only skills/ (made by newr): not detected.
+        self.assertFalse(detected(self.newr("agents", env=env).stdout, "claude-code"))
+        # A real file next to skills/ makes it detected again.
+        (self.home / ".claude" / "settings.json").write_text("{}")
+        self.assertTrue(detected(self.newr("agents", env=env).stdout, "claude-code"))
+        # An empty marker dir is not detected either: nothing in it
+        # proves an install.
+        (self.home / ".cursor").mkdir()
+        self.assertFalse(detected(self.newr("agents", env=env).stdout, "cursor"))
 
     def test_install_agent_auto_with_nothing_detected_fails(self):
         empty_bin = Path(self.tmp.name) / "emptybin"
@@ -304,7 +368,7 @@ class NewrTest(unittest.TestCase):
         (dest / ".newr.json").write_text(json.dumps(receipt))
         proc = self.newr("update")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("installed i18n 0.4.0", proc.stdout)
+        self.assertIn("installed i18n 0.5.0", proc.stdout)
 
     def test_info_shows_agent_installs(self):
         self.newr("install", "--agent", "opencode", "testing")
@@ -334,12 +398,13 @@ class NewrTest(unittest.TestCase):
             self.assertLessEqual(len(desc), 1024, name)
             self.assertTrue(set(fields) <= SPEC_FRONTMATTER_FIELDS, name)
             self.assertEqual(fields.get("license"), "MIT", name)
-            self.assertIn("0.4.0", (skill / "SKILL.md").read_text(), name)
+            self.assertIn("0.5.0", (skill / "SKILL.md").read_text(), name)
 
     def test_skill_script_copies_match_root(self):
         pairs = [
             ("skills/build-discord-bot/scripts/make_cog.py", "scripts/make_cog.py"),
             ("skills/deploy-and-monitor/scripts/check_setup.py", "scripts/check_setup.py"),
+            ("skills/economy-database/scripts/migrate.py", "scripts/migrate.py"),
         ]
         for copy, root in pairs:
             self.assertEqual(
@@ -352,7 +417,7 @@ class NewrTest(unittest.TestCase):
 
     def test_package_json_for_npx(self):
         pkg = json.loads((REPO_ROOT / "package.json").read_text())
-        self.assertEqual(pkg["version"], "0.4.0")
+        self.assertEqual(pkg["version"], "0.5.0")
         self.assertEqual(pkg["bin"], {"newr": "./newr"})
         self.assertIn("newr", pkg["files"])
         self.assertIn("skills/", pkg["files"])
