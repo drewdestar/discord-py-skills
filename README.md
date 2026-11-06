@@ -50,8 +50,8 @@ newr install --agent copilot --project testing  # into this project
 
 ## Install with npx (no install step)
 
-No install, no clone. Needs Node.js 18 or newer and Python 3.10 or
-newer, on macOS or Linux:
+No install, no clone. Needs Node.js 18 or newer, Python 3.10 or
+newer, and git, on macOS or Linux:
 
 ```bash
 npx -y github:drewdestar/discord-py-skills install all
