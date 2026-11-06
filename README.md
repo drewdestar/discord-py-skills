@@ -293,6 +293,97 @@ the block this section used to show, verbatim. The after code is
 trimmed from the real starter bot (`config.py`, `bot.py`, `db.py`):
 long SQL strings are elided with `...` inside the string literal.
 
+### Dashboard
+
+The same numbers, two presentations. Before is the raw JSON the demo
+serves at `/api/stats`; after is the demo dashboard itself
+(`skills/bot-dashboard/scripts/dashboard.py`, Hallmark console theme)
+reading that same endpoint.
+
+| **Before: raw `/api/stats` JSON** | **After: the demo dashboard** |
+|:--|:--|
+| <a href="assets/compare/dashboard-before.png"><img src="assets/compare/dashboard-before.png" alt="Before: raw JSON from /api/stats — guild_count 3, member_total 208, commands_today 93, top_commands and commands_by_day as plain text" width="100%"></a> | <a href="assets/compare/dashboard-after.png"><img src="assets/compare/dashboard-after.png" alt="After: the demo dashboard — Bot Dashboard, Live, stat cards Guilds 3, Members 208, Commands today 93, a 7-day bar chart, and a top-commands table" width="100%"></a> |
+| The data is all there, but nobody can read it at a glance. | Headline cards, a 7-day bar chart, and the top commands — the same JSON, presented. Run it with `python3 skills/bot-dashboard/scripts/dashboard.py --port 8765`. |
+
+### Docs site
+
+The same page, two forms. Before is `docs/index.md` as plain text,
+frontmatter and all; after is that page built by the VitePress site
+in `website/` (`website/.vitepress/dist`).
+
+| **Before: raw `docs/index.md`** | **After: the built docs site** |
+|:--|:--|
+| <a href="assets/compare/docs-before.png"><img src="assets/compare/docs-before.png" alt="Before: docs/index.md as plain text — YAML frontmatter, Install and Skills headings, raw Markdown links" width="100%"></a> | <a href="assets/compare/docs-after.png"><img src="assets/compare/docs-after.png" alt="After: the built VitePress site — discord-py-skills, Agent skills for building Discord bots with discord.py, with search and navigation" width="100%"></a> |
+| Readable in an editor, hostile in a browser. | Search, navigation, and the same words typeset. Build it with `cd website && npm install && npm run docs:build`. |
+
+### i18n
+
+The same two commands, two caches. Before is the anti-pattern
+`skills/i18n/SKILL.md` rule 4 warns about — a cache keyed by key
+alone, so the first language that asks wins for everyone after.
+After is the real `t()` from `examples/i18n_bot.py`, cached by
+`(locale, key)`. Both screenshots are verbatim output of one run
+(`capture-i18n.py` in the research notes runs both).
+
+| **Before: cache keyed by key alone** | **After: cache keyed by `(locale, key)`** |
+|:--|:--|
+| <a href="assets/compare/i18n-before.png"><img src="assets/compare/i18n-before.png" alt="Before: the Indonesian user gets Hello, @Andi! and the English user later gets Membeli Brick seharga 118 gold — each served the other language" width="100%"></a> | <a href="assets/compare/i18n-after.png"><img src="assets/compare/i18n-after.png" alt="After: the Indonesian user gets Halo, @Andi! and Membeli Brick seharga 118 gold, the English user gets Hello, @Andi! and Bought Brick for 118 gold" width="100%"></a> |
+| The Indonesian user is answered in English; the English user, later, in Indonesian. First language wins, everyone else loses. | Every user gets their own language, every time. See `skills/i18n/SKILL.md` rule 4 and `examples/i18n_bot.py`. |
+
+### .newr language
+
+The same bot, two spellings. Before is `examples/hello.py` — what `newr build` generates from the `.newr` source, trimmed here with `...` marking elided code. After is `examples/hello.newr` in full: one bot block, two commands, two events. The build is verified: `newr build examples/hello.newr` writes a file byte-identical to the committed `hello.py`.
+
+| **Before: plain discord.py, 80 lines** | **After: the .newr language, 21 lines** |
+|:--|:--|
+| <a href="assets/compare/newr-before.png"><img src="assets/compare/newr-before.png" alt="Before: examples/hello.py — imports, a Bot class with setup_hook and on_ready, and a ping slash command, trimmed with ... elisions" width="100%"></a> | <a href="assets/compare/newr-after.png"><img src="assets/compare/newr-after.png" alt="After: examples/hello.newr in full — bot HelloBot, ping and greet commands, ready and member_join events" width="100%"></a> |
+| Eighty lines to say: a bot, two commands, two events. | Twenty-one lines say the same bot. The compiler writes the other fifty-nine. Build it with `newr build examples/hello.newr`. |
+
+### Economy ledger
+
+The same +10 gold, two write paths. Before runs the documented before-code: an f-string UPDATE with no commit, so the gold is gone on restart. After runs the real `credit_once` from `templates/starter-bot/db.py`, which writes the balance change and the ledger row in one atomic transaction. Both halves are verbatim output of one run (`capture-economy.py` in the research notes runs both).
+
+| **Before: f-string SQL, no commit** | **After: the atomic ledger** |
+|:--|:--|
+| <a href="assets/compare/economy-before.png"><img src="assets/compare/economy-before.png" alt="Before: balance 100 gold, an f-string UPDATE adds 10, no commit — after a restart the balance is 100 gold, the +10 is gone" width="100%"></a> | <a href="assets/compare/economy-after.png"><img src="assets/compare/economy-after.png" alt="After: balance 100 gold, credit_once adds 10 — after a restart the balance is 110 gold and 2 ledger rows exist" width="100%"></a> |
+| The +10 gold never reached the disk. | The +10 gold survived the restart, with 2 ledger rows to prove it. |
+
+### Testing
+
+The same suite, two bots. Before is the suite run against a copy of the starter bot with one real bug: `/ping` answers "Pong!" without the latency. After is the same suite against the real starter bot.
+
+| **Before: one real bug, caught** | **After: the bug fixed** |
+|:--|:--|
+| <a href="assets/compare/testing-before.png"><img src="assets/compare/testing-before.png" alt="Before: pytest fails — test_ping_answers_with_latency, AssertionError, 1 failed in 0.33s" width="100%"></a> | <a href="assets/compare/testing-after.png"><img src="assets/compare/testing-after.png" alt="After: the full starter-bot suite — 21 passed in 0.47s" width="100%"></a> |
+| One failed test names the exact line and the exact words. | Twenty-one passed. The bug cannot ship without the suite noticing. |
+
+### Antislop copy
+
+The same three ideas, two wordings. Both sides are quoted verbatim from the antislop-copywriting skill's pattern list — the slop on the left, the fix on the right. These are general copy patterns, not Discord messages; the antislop skill applies the same rules to bot replies (see `skills/antislop/references/reply-copy.md`).
+
+| **Before: the slop** | **After: the fix** |
+|:--|:--|
+| <a href="assets/compare/antislop-before.png"><img src="assets/compare/antislop-before.png" alt="Before: three slop lines — Unlock the power of seamless collaboration, Our platform is marking a pivotal moment, Here is an overview of our pricing. I hope this helps!" width="100%"></a> | <a href="assets/compare/antislop-after.png"><img src="assets/compare/antislop-after.png" alt="After: three fixes — Work with your team in one shared space, Our platform cuts the time your team spends on status meetings, Here is our pricing" width="100%"></a> |
+| "Unlock the power", "a pivotal moment", "I hope this helps!" — ceremony where content should be. | Short words, sourced facts, nothing left to impress with. |
+
+### Slash commands
+
+The same bot, two ways to take orders. Before is the documented before-code: one `on_message` handler that has to parse every message by hand, with no command framework at all. After is the live command tree the slash-commands skill registers — listed by real discord.py with no token and no network (`capture-slash.py` in the research notes runs it).
+
+| **Before: one on_message handler** | **After: six slash commands** |
+|:--|:--|
+| <a href="assets/compare/slash-before.png"><img src="assets/compare/slash-before.png" alt="Before: the documented before-code — one file, blocking calls, token in source, an on_message handler with an f-string UPDATE and no commit" width="100%"></a> | <a href="assets/compare/slash-after.png"><img src="assets/compare/slash-after.png" alt="After: the live command tree — /boom, /buy, /claim, /kick, /ping, /profile with descriptions" width="100%"></a> |
+| No names for Discord to show, no descriptions, no validation. | Names, descriptions, autocomplete, and checks — Discord knows every command before the user types. |
+
+### Deploy checklist
+
+The same checker, two projects. Before is `check_setup.py` from the deploy-and-monitor skill run against a copy of the starter bot with `requirements.txt` and `.gitignore` removed. After is the same checker against the real starter bot.
+
+| **Before: two files missing** | **After: 6/6 checks passed** |
+|:--|:--|
+| <a href="assets/compare/deploy-before.png"><img src="assets/compare/deploy-before.png" alt="Before: the deploy checker fails on requirements.txt and .gitignore — 4/6 checks passed" width="100%"></a> | <a href="assets/compare/deploy-after.png"><img src="assets/compare/deploy-after.png" alt="After: the same checker against the starter bot — 6/6 checks passed" width="100%"></a> |
+| The deploy fails on the files nobody remembered. | Every check passes before the bot ever leaves the machine. |
+
 ## Starter bot
 
 `templates/starter-bot/` is a minimal working bot (`/ping`, `/balance`)
