@@ -1,6 +1,11 @@
 ---
 name: testing
-description: "Test a discord.py bot: unit tests for pure logic, mocked interactions for commands, and async tests with pytest-asyncio. Use when adding tests or when a bot change needs proof it works."
+description: "Test a discord.py bot: unit tests for pure logic, mocked interactions for commands, and async tests with pytest-asyncio. Use when the user says 'write tests for the bot', 'the test passes but the bot is broken', or before changing anything that touches balances or permissions. Do NOT use for manual live checks alone; live verification is separate from the test suite."
+license: MIT
+compatibility: "discord.py 2.x, Python 3.10+, no paid services"
+metadata:
+  version: "0.3.0"
+  author: "drewdestar"
 ---
 
 # Testing Discord Bots
@@ -99,6 +104,33 @@ async def test_ping_answers():
 - Assert on what the user would see (the message text), not on internal calls. If the test asserts the bot called an internal helper, it breaks on every refactor.
 - `AsyncMock` for `response` and `followup`: `send_message` and `defer` are coroutines, and a plain `MagicMock` for them returns a non-awaitable that fails with a confusing error.
 
+## Tests must be able to fail
+
+A test that cannot fail proves nothing. These are the ways tests
+written by an AI usually lie:
+
+- **Asserting what the code does, not what it should do.** Expected
+  values come from the spec or a worked example, never by
+  recomputing the value the way the code does. A test that asserts
+  `add(a, b) == a + b` passes by construction and can never catch
+  a bug.
+- **Asserting truthiness instead of values.** `assert result`
+  passes for any non-empty value. Assert the exact value:
+  `assert balance == 60`.
+- **Mocking the unit under test.** If the test mocks the function
+  it is testing, it tests the mock. Mock the boundary (Discord,
+  the database, the clock), never the code under test.
+- **Only testing the happy path.** Every command needs an error-path
+  test: `MissingPermissions`, `Forbidden`, an interaction timeout,
+  invalid input. A bot crashes on the paths nobody tested.
+- **Writing tests after the fix.** Write the failing test first,
+  watch it fail, then fix the code. A test written after the fix
+  often asserts the bug as correct behavior.
+
+Before trusting a suite, break something on purpose: change one
+expected value and confirm the test goes red. If it stays green,
+the test is decoration.
+
 ## What not to test
 
 - Do not call the real Discord API in tests. No live token, no test server, no network. A test that needs the network is flaky by definition.
@@ -132,6 +164,33 @@ jobs:
 ```
 
 - CI runs on every push and every pull request. A test suite that only runs on the developer's machine is a suggestion, not a gate.
+
+## Verify live
+
+A green suite is not proof the bot works. Tests use mocks; Discord
+does not. After the suite passes:
+
+1. Run the bot against the test guild.
+2. Invoke every command the suite covers, once, in Discord.
+3. Trigger one error path in Discord (for example, a command the
+   user has no permission for). It must answer with the error
+   message, not silence.
+4. Restart the bot. Balances and data survive the restart.
+
+Report the observed reply for each command. "Tests pass" is a
+statement about the suite, not about the bot.
+
+## Quality bar (no slop)
+
+- **Evidence over claims.** Never report "all tests pass" without
+  running them. Quote the actual output (`pytest -q`, the count,
+  the failures). A number you did not measure is invented.
+- **No em dash** in any message, embed, or reply the bot sends.
+- **No fabricated coverage.** Do not claim a percentage of coverage
+  or a number of cases unless the tool printed it.
+- **Every check has a reason.** A test exists because a real failure
+  mode exists. If you cannot name the failure in one line, delete
+  the test.
 
 ## Checklist
 

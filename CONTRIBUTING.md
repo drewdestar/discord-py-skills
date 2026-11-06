@@ -23,6 +23,12 @@ Contributions are welcome. Keep them small, tested, and honest.
 - No fake statistics, no invented benchmarks, no "best" claims.
 - No em dashes in user-facing text. Use commas, colons, or
   parentheses instead.
+- Frontmatter uses only the six Agent Skills spec fields (`name`,
+  `description`, `license`, `compatibility`, `metadata`,
+  `allowed-tools`). The `name` must equal the folder name and the
+  description must stay under 1024 characters.
+- Script copies in `skills/<name>/scripts/` must stay byte-identical
+  to `scripts/` at the repo root; `tests/test_newr.py` checks this.
 
 ## Rules for code
 

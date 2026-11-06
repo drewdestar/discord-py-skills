@@ -1,11 +1,49 @@
 ---
 name: deploy-and-monitor
-description: "Run a discord.py bot 24/7: systemd service, watchdog restarts, log rotation, health checks, and safe restarts that never lose data. Use when deploying a bot or when a bot keeps dying silently."
+description: "Run a discord.py bot 24/7: systemd service, watchdog restarts, log rotation, health checks, and safe restarts that never lose data. Use when the user says 'keep my bot online', 'my bot keeps dying', or 'deploy the bot'. Do NOT use for writing bot code; use build-discord-bot for that."
+license: MIT
+compatibility: "discord.py 2.x, Python 3.10+, systemd, no paid services"
+metadata:
+  version: "0.3.0"
+  author: "drewdestar"
 ---
 
 # Deploy and Monitor
 
 A bot that dies at 3 AM and stays dead until someone notices is not deployed, it is running on luck. This skill makes the bot restart itself, prove it is alive, and restart safely for updates.
+
+## Keeping it online is the killer step
+
+Building the bot is the easy part. Keeping it online after deploy
+is where most hobby bots die. Never recommend running the bot on a
+laptop and closing the lid, on a free REPL that sleeps, or with
+`nohup python bot.py &` and no supervisor. A deploy is not done
+until all three exist:
+
+1. A supervisor that restarts the process (systemd `Restart=always`
+   above, or a Docker `restart: unless-stopped` policy).
+2. A watchdog that restarts a process that is alive but stuck
+   (heartbeat file, above).
+3. A health check probed from outside the bot (uptime monitor or
+   cron hitting `/health`).
+
+If any of the three is missing, the bot will die silently at some
+point, and nobody will notice until a user complains.
+
+## If the token leaks
+
+A token in a log, a screenshot, a pasted file, or a public repo is
+compromised the moment it is visible. Bots scan for exposed tokens
+constantly. The runbook:
+
+1. Reset the token in the Discord Developer Portal immediately.
+2. Update `.env` / the `EnvironmentFile` on the server.
+3. Restart the service and confirm the login line.
+4. Check the audit log for what the stolen token did while it was
+   live (kicks, bans, messages, role changes).
+
+Do not just delete the message that exposed it. The token is
+already copied.
 
 ## systemd service
 
@@ -90,6 +128,27 @@ Never restart with `kill -9`. A forced kill can interrupt a database write mid-t
 
 - Run two copies behind the same token only during a handover, and only briefly: start the new copy, confirm it logs in and answers, then stop the old one. Two live copies of a bot that writes to the same database will corrupt balances; two copies sharing one SQLite file is never safe for long.
 - For most small bots, a 10 second restart window is fine. Do not build a zero-downtime system before the bot has users who would notice 10 seconds.
+
+## Verify live
+
+- Kill the process (`systemctl stop mybot`, then start it, or kill
+  the PID in staging). The service is back within 10 seconds and
+  the login line appears.
+- Stop the heartbeat writer (or touch an old timestamp). The
+  watchdog restarts the service within one minute.
+- Hit `/health` from outside the machine. It returns 200 only when
+  the bot is connected and the database answers. A health endpoint
+  that always returns 200 proves nothing.
+- Deploy once end to end from the written steps, on a staging copy
+  if one exists. Steps that were never run are wishes, not a
+  runbook.
+
+## Quality bar (no slop)
+
+- Every claim about uptime must come from the monitor or the logs,
+  never from a feeling. "It has been up for weeks" needs a
+  timestamp to back it.
+- No em dash in any message or embed the bot sends.
 
 ## Checklist
 

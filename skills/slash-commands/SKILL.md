@@ -1,6 +1,11 @@
 ---
 name: slash-commands
-description: "Add slash commands to a discord.py bot: app_commands, groups, checks, autocomplete, cooldowns, and error handling that answers the user instead of failing silently. Use when adding or fixing any slash command."
+description: "Add slash commands to a discord.py bot: app_commands, groups, checks, autocomplete, cooldowns, and error handling that answers the user instead of failing silently. Use when the user says 'add a /balance command', 'my command does not show up', or 'interaction failed'. Do NOT use for prefix commands or for the bot skeleton; use build-discord-bot for setup."
+license: MIT
+compatibility: "discord.py 2.x, Python 3.10+, no paid services"
+metadata:
+  version: "0.3.0"
+  author: "drewdestar"
 ---
 
 # Slash Commands
@@ -41,6 +46,22 @@ else:
 
 - Never sync globally on every startup during development. Global propagation is slow and every sync is a rate-limited API call.
 - Keep one test guild id in the environment and sync to it while building. Sync globally only when releasing.
+- If a command's callback changed but Discord still runs the old version, that is `CommandSignatureMismatch`: sync again in the same scope (test guild or global) after changing a signature. Changing code without re-syncing changes nothing users see.
+- Never sync on every message or every command invocation. Sync once at startup (test guild) or once on release (global).
+- Persistent views (buttons that must work after a restart) need `bot.add_view()` in `setup_hook` or `on_ready`, with a stable `custom_id`. A view registered only inside a command dies with the restart.
+
+## Verify live
+
+- The command appears in the test guild immediately after a guild sync. Global sync can take up to an hour; that is normal, not a bug.
+- Run the command once in Discord. It answers within 3 seconds or defers first.
+- Run it with a user who lacks permission. The user sees the permission error, not silence.
+- Change the command description, re-sync, and confirm Discord shows the new text. This proves the sync path works.
+
+## Quality bar (no slop)
+
+- Every command answers or shows an error. No dead commands.
+- No invented data in replies: a value shown to a user comes from the database or the API, never from a placeholder.
+- No em dash in any message or embed the bot sends.
 
 ## Defer when the command is slow
 

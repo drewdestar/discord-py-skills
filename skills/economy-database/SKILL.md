@@ -1,6 +1,11 @@
 ---
 name: economy-database
-description: "Build a safe SQLite economy for a discord.py bot: WAL mode, schema with migrations, atomic transactions, idempotency keys, and hourly backups. Use when adding currency, inventories, shops, or any persistent player data."
+description: "Build a safe SQLite economy for a discord.py bot: WAL mode, schema with migrations, atomic transactions, idempotency keys, and hourly backups. Use when the user says 'add currency', 'my balances reset on restart', or 'two users bought at once and gold duplicated'. Do NOT use for in-memory or JSON storage, and do NOT use SQLite for production on hosts that wipe local files; use Postgres with asyncpg there."
+license: MIT
+compatibility: "discord.py 2.x, Python 3.10+, aiosqlite, no paid services"
+metadata:
+  version: "0.3.0"
+  author: "drewdestar"
 ---
 
 # Economy Database
@@ -148,6 +153,52 @@ async def migrate(db) -> None:
 - Copy the `.db` file once an hour (a running copy with `sqlite3 .backup` or a plain file copy while using WAL with a checkpoint first). Keep 7 days of hourly copies, then delete older ones.
 - Test restores. A backup that was never restored is a hope, not a backup.
 - Never ship the `.db` file in git. It belongs in `.gitignore` and in the backup directory only.
+
+## Race test: two claims at once must not double-pay
+
+Atomicity is a claim until a test proves it. Run two identical
+credits concurrently and assert the balance moved exactly once:
+
+```python
+async def test_concurrent_daily_pays_once(db):
+    lock = asyncio.Lock()
+    key = "daily:1:2026-11-06"
+    results = await asyncio.gather(
+        credit_once(db, lock, 1, 100, "daily", key),
+        credit_once(db, lock, 1, 100, "daily", key),
+    )
+    assert results.count(True) == 1
+    assert await get_balance(db, 1) == 100
+```
+
+A read-then-write balance update fails this test: both requests
+read the old balance and both write, creating money. Only an atomic
+`UPDATE users SET balance = balance + ?` inside `BEGIN IMMEDIATE`
+passes it. If the test fails, the economy is broken, no matter how
+correct the code reads.
+
+## Persistence warning
+
+SQLite is a file. On hosts that wipe local files on redeploy
+(Railway, Heroku, and similar), the database disappears with the
+deploy and every balance resets to zero. For production on such a
+host, use Postgres with `asyncpg` instead, keeping the same rules:
+one writer, ledger as source of truth, atomic transfers,
+idempotency keys, parameterized queries.
+
+## Verify live
+
+- Restart the bot. Balances are exactly what they were before.
+- Run `/daily` twice in a row in Discord. The second run says the
+  reward was already claimed; the balance moved once.
+- Restore one hourly backup into a scratch copy and read a known
+  balance from it. A backup that was never restored is unproven.
+
+## Quality bar (no slop)
+
+- Never invent a balance, a price, or a count. The ledger is the
+  source of truth; a number shown to a user comes from a query.
+- No em dash in any message or embed the bot sends.
 
 ## Checklist
 

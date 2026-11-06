@@ -1,6 +1,11 @@
 ---
 name: i18n
-description: "Ship a multi-language discord.py bot: per-user locale preference, locale tables, fallback chain, and the translation pitfalls that break other languages. Use when adding languages or fixing wrong-language replies."
+description: "Ship a multi-language discord.py bot: per-user locale preference, locale tables, fallback chain, and the translation pitfalls that break other languages. Use when the user says 'make the bot speak Indonesian', 'the bot answers in the wrong language', or 'add a /language command'. Do NOT use for translating at runtime with a machine translator; ship reviewed tables instead."
+license: MIT
+compatibility: "discord.py 2.x, Python 3.10+, no paid services"
+metadata:
+  version: "0.3.0"
+  author: "drewdestar"
 ---
 
 # Multi-Language Bots (i18n)
@@ -89,6 +94,22 @@ class AppTranslator(app_commands.Translator):
 ```
 
 - Return `None` when no translation exists; discord.py falls back to the source string. Returning the key or an empty string is worse than falling back.
+
+## Verify live
+
+- Render one command in every supported locale in a test, then run
+  `/language` in Discord, switch locale, and run the same command
+  again. The reply changes language; the placeholders still fill.
+- Break one translation on purpose (drop a `{item}` placeholder)
+  and start the bot. Startup validation must refuse to start.
+  A bot that starts with broken translations ships broken replies.
+
+## Quality bar (no slop)
+
+- Never ship a translation you have not verified. A fluent-looking
+  string in a language nobody on the team reads is a guess, and a
+  wrong-language reply is worse than an English one.
+- No em dash in any message or embed the bot sends.
 
 ## Checklist
 

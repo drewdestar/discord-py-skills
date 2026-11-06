@@ -4,7 +4,11 @@ Agent skills and a production starter kit for building Discord bots with
 discord.py. Each skill teaches an AI coding agent one job, with the
 patterns that keep a real bot running: correct intents, slash commands
 that answer errors, a SQLite economy that cannot create money, honest
-i18n, and deploys that restart themselves.
+i18n, and deploys that restart themselves. Current release: v0.3.0.
+
+Works with Claude Code, Codex, Cursor, Windsurf, GitHub Copilot,
+Gemini CLI, OpenCode, Kilo Code, Cline, Zed, and Aider. See
+[docs/AGENTS.md](docs/AGENTS.md) for every install directory.
 
 ## Install with newr (like Homebrew)
 
@@ -15,7 +19,7 @@ install skills by name:
 curl -fsSL https://raw.githubusercontent.com/drewdestar/discord-py-skills/main/install.sh | sh
 newr search
 newr install slash-commands
-newr install all               # all six skills
+newr install all               # all seven skills
 newr install starter-bot       # runnable starter bot into ./starter-bot
 ```
 
@@ -23,59 +27,95 @@ newr install starter-bot       # runnable starter bot into ./starter-bot
 |---|---|
 | `newr search [query]` | List installable packages |
 | `newr info <package>` | Show a package's details and install state |
-| `newr install <pkg>...` | Install packages (`all` = the six skills) |
+| `newr install <pkg>...` | Install packages (`all` = the seven skills) |
 | `newr uninstall <pkg>...` | Remove installed skills |
 | `newr list` | Show installed skills |
 | `newr update` | Refresh the registry and update installed skills |
 | `newr version` | Print the newr version |
+| `newr agents` | List supported agents and their skill dirs |
 
 Skills install to `~/.newr/skills/<name>` (`NEWR_HOME` overrides the
 prefix). Templates install into the current directory. No account, no
 token, no build step. `newr` is one Python file, standard library only.
 
+Install straight into an agent instead:
+
+```bash
+newr install --agent claude-code all    # Claude Code
+newr install --agent codex,cursor all   # several agents at once
+newr install --agent auto all           # every agent detected here
+newr install --agent all all            # every known agent
+newr install --agent copilot --project testing  # into this project
+```
+
+## Install with npx (no install step)
+
+No install, no clone. Needs Node.js 18 or newer and Python 3.10 or
+newer, on macOS or Linux:
+
+```bash
+npx -y github:drewdestar/discord-py-skills install all
+npx -y github:drewdestar/discord-py-skills install --agent claude-code all
+```
+
+This runs `newr` straight from the repo. The `newr` package is not
+published to the npm registry yet, so `npx newr` on its own does not
+work; use the `github:` form above.
+
+Claude Code can also install the pack as a plugin:
+
+```
+/plugin marketplace add drewdestar/discord-py-skills
+/plugin install discord-py-skills@discord-py-skills
+```
+
 ## Install by hand
 
-Copy the `skills/` folder into your agent's skills directory.
+Copy the `skills/` folder into your agent's skills directory. The
+recommended way is `newr install --agent <name> all` (see above);
+by hand, the directories are:
 
-**Claude Code:**
+| Agent | Copy to |
+|---|---|
+| Claude Code | `~/.claude/skills/` |
+| Codex | `~/.agents/skills/` (older installs also read `~/.codex/skills/`) |
+| Cursor | `~/.cursor/skills/` |
+| Windsurf / Devin Local | `~/.config/devin/skills/` |
+| GitHub Copilot | `~/.copilot/skills/` |
+| Gemini CLI | `~/.gemini/skills/` |
+| OpenCode | `~/.config/opencode/skills/` |
+| Kilo Code, Zed | `~/.agents/skills/` |
+| Cline | `~/.cline/skills/` |
+| Aider | no skill system; copy `aider/CONVENTIONS.md` and add it to `read:` in `.aider.conf.yml` |
 
-```bash
-cp -r skills/* ~/.claude/skills/
-```
-
-**Codex:**
-
-```bash
-cp -r skills/* ~/.codex/skills/
-```
-
-**Cursor:**
-
-```bash
-cp -r skills/* ~/.cursor/skills/
-```
-
-**OpenCode:**
-
-```bash
-cp -r skills/* ~/.config/opencode/skills/
-```
+Full matrix, including project-scope directories, is in
+[docs/AGENTS.md](docs/AGENTS.md).
 
 Then ask your agent to build a bot. It picks the skill that matches the
-job: `build-discord-bot` for scaffolding, `slash-commands` for commands,
+job: `using-discord-py-skills` routes the work first,
+`build-discord-bot` for scaffolding, `slash-commands` for commands,
 `economy-database` for currency, `i18n` for languages,
 `deploy-and-monitor` for running it, `testing` for proving it works.
 
 ## Skills
 
-| Skill | What it covers |
-|---|---|
-| `build-discord-bot` | Scaffold a correct bot: intents, cogs, async setup, config from the environment, logging |
-| `slash-commands` | Slash commands, groups, checks, autocomplete, cooldowns, error handling that answers the user |
-| `economy-database` | SQLite economy: WAL mode, atomic transfers, idempotency keys, ledger, backups |
-| `i18n` | Multi-language bots: per-user locale, fallback chain, translation pitfalls |
-| `deploy-and-monitor` | systemd service, watchdog restarts, log rotation, health checks, safe restarts |
-| `testing` | Unit tests for logic, mocked interactions for commands, async tests with pytest-asyncio |
+| Skill | What it covers | Use when |
+|---|---|---|
+| `using-discord-py-skills` | Routes any bot job to the right skill, in the right order | starting bot work, or unsure which skill applies |
+| `build-discord-bot` | Scaffold a correct bot: intents, cogs, async setup, config from the environment, logging | "build me a bot", "my bot does not answer" |
+| `slash-commands` | Slash commands, groups, checks, autocomplete, cooldowns, error handling that answers the user | "add a /balance command", "interaction failed" |
+| `economy-database` | SQLite economy: WAL mode, atomic transfers, idempotency keys, ledger, backups | "add currency", "gold duplicated" |
+| `i18n` | Multi-language bots: per-user locale, fallback chain, translation pitfalls | "speak Indonesian", "wrong language replies" |
+| `deploy-and-monitor` | systemd service, watchdog restarts, log rotation, health checks, safe restarts | "keep my bot online", "my bot keeps dying" |
+| `testing` | Unit tests for logic, mocked interactions for commands, async tests with pytest-asyncio | "write tests", "the test passes but the bot is broken" |
+
+## Quality bar
+
+Every skill enforces the same bar, written up in
+[docs/QUALITY.md](docs/QUALITY.md): no em dash in anything the bot
+sends, no invented numbers, every command answers, every feature has
+a one-line reason, and nothing is called done until it is verified
+live in Discord. A green test suite is not proof the bot answers.
 
 ## Before / after
 

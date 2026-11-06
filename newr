@@ -6,7 +6,7 @@ installs formulae:
 
     newr search              list every installable package
     newr install slash-commands
-    newr install all         install all six skills
+    newr install all         install all seven skills
     newr install starter-bot install the runnable starter bot into ./starter-bot
     newr list                show installed skills
     newr update              refresh the registry and update installed skills
@@ -14,7 +14,24 @@ installs formulae:
 
 Skills install to ~/.newr/skills/<name> by default (NEWR_HOME overrides
 the prefix). Templates install into the current directory unless
---target is given. Everything is fetched from the public repo at
+--target is given.
+
+Multi-agent install: the same skills work in every agent that reads
+the open Agent Skills format (SKILL.md + frontmatter). Install them
+straight into an agent's skill directory:
+
+    newr install --agent claude-code all
+    newr install --agent codex,cursor slash-commands
+    newr install --agent auto all      install into every agent detected
+    newr install --agent all all       install into every known agent
+    newr install --agent copilot --project testing
+                                       install into ./.github/skills/
+
+Run `newr agents` to see every supported agent, its skill directory,
+and which agents are detected on this machine. Aider has no skill
+system, so --agent aider installs a CONVENTIONS.md digest instead.
+
+Everything is fetched from the public repo at
 https://github.com/drewdestar/discord-py-skills; no account, no token,
 no build step. Python 3.9+ and the standard library only.
 """
@@ -29,11 +46,104 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 REPO = "drewdestar/discord-py-skills"
 REGISTRY_URL = "https://raw.githubusercontent.com/" + REPO + "/main/registry.json"
 TARBALL_URL = "https://codeload.github.com/" + REPO + "/tar.gz/refs/heads/main"
 RECEIPT = ".newr.json"
+CONVENTIONS = "CONVENTIONS.md"
+
+# Agent skill directories, from each agent's own documentation
+# (see docs/AGENTS.md for the sources). The registry carries the
+# same table under "agents" and wins when present, so new agents can
+# be added without shipping a new newr; this table is the fallback
+# for old cached registries. "user" dirs are relative to $HOME,
+# "project" dirs relative to the current directory. "detect" markers
+# are either a path under $HOME (starts with "~/") or a binary name
+# looked up on $PATH. Aider has no skill system: it gets a
+# CONVENTIONS.md digest instead of skill folders.
+BUILTIN_AGENTS = {
+    "claude-code": {
+        "description": "Claude Code",
+        "user": ["~/.claude/skills"],
+        "project": [".claude/skills"],
+        "detect": ["~/.claude", "claude"],
+    },
+    "codex": {
+        "description": "OpenAI Codex",
+        "user": ["~/.agents/skills", "~/.codex/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.codex", "codex"],
+    },
+    "cursor": {
+        "description": "Cursor",
+        "user": ["~/.cursor/skills"],
+        "project": [".cursor/skills"],
+        "detect": ["~/.cursor", "cursor"],
+    },
+    "windsurf": {
+        "description": "Windsurf / Devin Local",
+        "user": ["~/.config/devin/skills"],
+        "project": [".devin/skills"],
+        "detect": ["~/.config/devin", "~/.codeium", "devin"],
+    },
+    "copilot": {
+        "description": "GitHub Copilot",
+        "user": ["~/.copilot/skills"],
+        "project": [".github/skills"],
+        "detect": ["~/.copilot", "copilot"],
+    },
+    "gemini": {
+        "description": "Gemini CLI",
+        "user": ["~/.gemini/skills"],
+        "project": [".gemini/skills"],
+        "detect": ["~/.gemini", "gemini"],
+    },
+    "opencode": {
+        "description": "OpenCode",
+        "user": ["~/.config/opencode/skills"],
+        "project": [".opencode/skills"],
+        "detect": ["~/.config/opencode", "opencode"],
+    },
+    "kilo": {
+        "description": "Kilo Code",
+        "user": ["~/.agents/skills"],
+        "project": [".kilocode/skills"],
+        "detect": ["~/.kilocode", "~/.kilo", "kilo"],
+    },
+    "cline": {
+        "description": "Cline",
+        "user": ["~/.cline/skills"],
+        "project": [".cline/skills"],
+        "detect": ["~/.cline", "cline"],
+    },
+    "zed": {
+        "description": "Zed",
+        "user": ["~/.agents/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.config/zed", "zed"],
+    },
+    "agents": {
+        "description": "Shared .agents/skills dir (Codex, Cursor, Gemini, OpenCode, Kilo, Zed, Windsurf)",
+        "user": ["~/.agents/skills"],
+        "project": [".agents/skills"],
+        "detect": [],
+    },
+    "aider": {
+        "description": "Aider (no skill system; installs a CONVENTIONS.md digest)",
+        "user": ["~/.newr/aider"],
+        "project": ["."],
+        "detect": ["aider", "~/.aider.conf.yml"],
+        "conventions": True,
+    },
+}
+
+AGENT_ALIASES = {
+    "devin": "windsurf",
+    "claude": "claude-code",
+    "github-copilot": "copilot",
+    "gemini-cli": "gemini",
+}
 
 
 class NewrError(Exception):
@@ -103,6 +213,73 @@ def load_registry(refresh: bool = False) -> dict:
     return json.loads(cache.read_text(encoding="utf-8"))
 
 
+def agent_table(registry: dict) -> dict:
+    """Agent targets: the registry's "agents" section wins; the
+    built-in table is the fallback for old cached registries."""
+    table = registry.get("agents")
+    if isinstance(table, dict) and table:
+        return table
+    return BUILTIN_AGENTS
+
+
+def expand_user_dir(value: str) -> Path:
+    return Path(os.path.expanduser(value))
+
+
+def agent_dirs(agent: str, table: dict, project: bool) -> list:
+    entry = table.get(agent, {})
+    key = "project" if project else "user"
+    raw = entry.get(key, [])
+    if project:
+        return [Path.cwd() / d for d in raw]
+    return [expand_user_dir(d) for d in raw]
+
+
+def is_conventions_agent(agent: str, table: dict) -> bool:
+    return bool(table.get(agent, {}).get("conventions", False))
+
+
+def detect_agents(table: dict) -> list:
+    """Agents whose marker exists on this machine: a $HOME path
+    (dir or file) or a binary on $PATH."""
+    found = []
+    for name, entry in table.items():
+        for marker in entry.get("detect", []):
+            if marker.startswith("~/"):
+                if expand_user_dir(marker).exists():
+                    found.append(name)
+                    break
+            elif shutil.which(marker):
+                found.append(name)
+                break
+    return found
+
+
+def resolve_agent_spec(spec: str, table: dict) -> list:
+    """One --agent value into agent names. 'all' is every agent
+    except aider (aider has no skill dirs); 'auto' is every agent
+    detected on this machine. Comma-separated and repeatable names
+    are accepted; 'devin' is an alias for 'windsurf'."""
+    wanted: list = []
+    for part in spec.split(","):
+        name = AGENT_ALIASES.get(part.strip().lower(), part.strip().lower())
+        if not name:
+            continue
+        if name == "all":
+            wanted.extend(n for n in table if not is_conventions_agent(n, table))
+        elif name == "auto":
+            wanted.extend(detect_agents(table))
+        elif name in table:
+            wanted.append(name)
+        else:
+            raise NewrError(
+                "unknown agent '%s'. Run `newr agents` to see the supported agents."
+                % part.strip()
+            )
+    seen = set()
+    return [n for n in wanted if not (n in seen or seen.add(n))]
+
+
 def packages(registry: dict) -> dict:
     return {p["name"]: p for p in registry.get("packages", [])}
 
@@ -111,7 +288,7 @@ def resolve(name: str, registry: dict) -> dict:
     """One package by name. 'all' and the repo name mean every skill."""
     if name in ("all", "discord-py-skills"):
         return {"name": "all", "type": "bundle", "version": registry.get("version", "?"),
-                "description": "all six skills", "path": ""}
+                "description": "all seven skills", "path": ""}
     found = packages(registry).get(name)
     if found is None:
         raise NewrError("no package named '%s'. Run `newr search` to see what exists." % name)
@@ -146,32 +323,84 @@ def dest_for(pkg: dict, target: Path | None) -> Path:
     return skills_dir() / pkg["name"]
 
 
-def installed_receipt(pkg_name: str) -> dict | None:
-    receipt = skills_dir() / pkg_name / RECEIPT
+def receipt_at(dest: Path) -> dict | None:
+    receipt = dest / RECEIPT
     if receipt.is_file():
         return json.loads(receipt.read_text(encoding="utf-8"))
     return None
 
 
-def install_one(pkg: dict, source_root: Path, target: Path | None, force: bool) -> str:
+def installed_receipt(pkg_name: str) -> dict | None:
+    return receipt_at(skills_dir() / pkg_name)
+
+
+def install_one(pkg: dict, source_root: Path, target: Path | None,
+                force: bool, agent: str | None = None,
+                refresh: bool = False) -> str:
     dest = dest_for(pkg, target)
-    receipt = installed_receipt(pkg["name"])
-    if receipt and receipt.get("version") == pkg["version"] and not force and target is None:
-        return "already installed: %s %s" % (pkg["name"], pkg["version"])
+    receipt = receipt_at(dest)
+    # A --target install is an explicit placement: always refresh it.
+    # A managed install (default dir or an agent dir) is a noop when
+    # the same version is already there.
+    if receipt and receipt.get("version") == pkg["version"] and not force and not refresh:
+        where = "for %s " % agent if agent else ""
+        return "already installed: %s %s %s-> %s" % (pkg["name"], pkg["version"], where, dest)
     src = source_root / pkg["path"]
     if not src.is_dir():
         raise NewrError("package %s is missing from the source (%s)" % (pkg["name"], pkg["path"]))
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(src, dest)
-    (dest / RECEIPT).write_text(json.dumps({
+    data = {
         "name": pkg["name"],
         "type": pkg["type"],
         "version": pkg["version"],
         "source": REPO,
         "installed_at": datetime.now(timezone.utc).isoformat(),
-    }, indent=2), encoding="utf-8")
+    }
+    if agent:
+        data["agent"] = agent
+    (dest / RECEIPT).write_text(json.dumps(data, indent=2), encoding="utf-8")
     return "installed %s %s -> %s" % (pkg["name"], pkg["version"], dest)
+
+
+def install_conventions(source_root: Path, dest_dir: Path) -> str:
+    """Aider has no skill system, so it gets a CONVENTIONS.md digest
+    of the whole pack instead of skill folders."""
+    src = source_root / "aider" / CONVENTIONS
+    if not src.is_file():
+        raise NewrError("the Aider conventions file is missing from the source")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / CONVENTIONS
+    shutil.copyfile(src, dest)
+    return ("installed Aider conventions -> %s\n"
+            "  Aider has no skill system. Add this file to .aider.conf.yml:\n"
+            "    read:\n"
+            "      - %s" % (dest, dest))
+
+
+def parse_agent_flags(args: list) -> tuple:
+    """Pull --agent/--project out of an arg list. Returns
+    (agent_specs, project, remaining_args)."""
+    specs: list = []
+    project = False
+    rest: list = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--project":
+            project = True
+            i += 1
+        elif arg == "--agent" and i + 1 < len(args):
+            specs.append(args[i + 1])
+            i += 2
+        elif arg.startswith("--agent="):
+            specs.append(arg[len("--agent="):])
+            i += 1
+        else:
+            rest.append(arg)
+            i += 1
+    return specs, project, rest
 
 
 def cmd_search(args: list) -> int:
@@ -185,7 +414,7 @@ def cmd_search(args: list) -> int:
     for p in rows:
         installed = installed_receipt(p["name"])
         mark = " [installed %s]" % installed["version"] if installed else ""
-        print("%-20s %-8s %s%s" % (p["name"], p["type"], p["description"], mark))
+        print("%-24s %-8s %s%s" % (p["name"], p["type"], p["description"], mark))
     return 0
 
 
@@ -195,7 +424,7 @@ def cmd_info(args: list) -> int:
     registry = load_registry()
     pkg = resolve(args[0], registry)
     if pkg["type"] == "bundle":
-        print("all: the six skills in the discord-py-skills pack")
+        print("all: the seven skills in the discord-py-skills pack")
         return 0
     print("name:        %s" % pkg["name"])
     print("type:        %s" % pkg["type"])
@@ -207,29 +436,44 @@ def cmd_info(args: list) -> int:
         print("installed:   %s (%s)" % (receipt["version"], receipt["installed_at"]))
     else:
         print("installed:   no")
+    table = agent_table(registry)
+    hits = []
+    for name in table:
+        if is_conventions_agent(name, table):
+            continue
+        for base in agent_dirs(name, table, project=False):
+            if receipt_at(base / pkg["name"]):
+                hits.append(name)
+                break
+    if hits:
+        print("also installed for agents: %s" % ", ".join(sorted(set(hits))))
     return 0
 
+
 def cmd_install(args: list) -> int:
-    force = "--force" in args
+    specs, project, rest = parse_agent_flags(args)
+    force = "--force" in rest
     target = None
     names = []
     i = 0
-    while i < len(args):
-        if args[i] == "--force":
+    while i < len(rest):
+        if rest[i] == "--force":
             i += 1
-        elif args[i] == "--target" and i + 1 < len(args):
-            target = Path(args[i + 1])
+        elif rest[i] == "--target" and i + 1 < len(rest):
+            target = Path(rest[i + 1])
             i += 2
-        elif args[i].startswith("--target="):
-            target = Path(args[i][len("--target="):])
+        elif rest[i].startswith("--target="):
+            target = Path(rest[i][len("--target="):])
             i += 1
         else:
-            names.append(args[i])
+            names.append(rest[i])
             i += 1
     if not names:
         raise NewrError("usage: newr install <package>... | newr install all")
     if target is not None and len(names) > 1:
         raise NewrError("--target installs one package at a time")
+    if target is not None and specs:
+        raise NewrError("use --agent or --target, not both")
     registry = load_registry()
     wanted = []
     for name in names:
@@ -241,35 +485,107 @@ def cmd_install(args: list) -> int:
     seen = set()
     wanted = [p for p in wanted if not (p["name"] in seen or seen.add(p["name"]))]
     source_root = package_source(registry)
-    for pkg in wanted:
-        print(install_one(pkg, source_root, target, force))
+    if not specs:
+        # Plain install: default behaviour, unchanged.
+        if project:
+            specs = ["agents"]
+        else:
+            for pkg in wanted:
+                print(install_one(pkg, source_root, target, force,
+                                  refresh=target is not None))
+            return 0
+    table = agent_table(registry)
+    agents = []
+    for spec in specs:
+        agents.extend(resolve_agent_spec(spec, table))
+    agents = list(dict.fromkeys(agents))
+    if not agents:
+        raise NewrError("no agent detected on this machine. "
+                        "Pick one explicitly: newr install --agent claude-code <package>")
+    if any(p["type"] == "template" for p in wanted):
+        raise NewrError("templates cannot install into an agent skill directory. "
+                        "Install a template without --agent (it goes into the current directory).")
+    for agent in agents:
+        if is_conventions_agent(agent, table):
+            for base in agent_dirs(agent, table, project):
+                print(install_conventions(source_root, base))
+            continue
+        for base in agent_dirs(agent, table, project):
+            for pkg in wanted:
+                print(install_one(pkg, source_root, base / pkg["name"],
+                                  force, agent=agent))
     return 0
 
 
 def cmd_uninstall(args: list) -> int:
-    if not args:
+    specs, project, rest = parse_agent_flags(args)
+    if not rest:
         raise NewrError("usage: newr uninstall <package>...")
-    for name in args:
-        dest = skills_dir() / name
-        if dest.is_dir():
-            shutil.rmtree(dest)
-            print("uninstalled %s" % name)
-        else:
-            print("not installed: %s" % name)
+    if not specs:
+        if project:
+            raise NewrError("newr uninstall --project needs --agent: "
+                            "newr uninstall --agent <name> --project <package>")
+        for name in rest:
+            dest = skills_dir() / name
+            if dest.is_dir():
+                shutil.rmtree(dest)
+                print("uninstalled %s" % name)
+            else:
+                print("not installed: %s" % name)
+        return 0
+    registry = load_registry()
+    table = agent_table(registry)
+    agents = []
+    for spec in specs:
+        agents.extend(resolve_agent_spec(spec, table))
+    for agent in dict.fromkeys(agents):
+        for base in agent_dirs(agent, table, project):
+            for name in rest:
+                dest = base / name
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                    print("uninstalled %s (for %s)" % (name, agent))
+                else:
+                    print("not installed: %s (for %s)" % (name, agent))
     return 0
 
 
 def cmd_list(args: list) -> int:
-    if not skills_dir().is_dir():
+    specs, project, rest = parse_agent_flags(args)
+    if rest:
+        raise NewrError("usage: newr list [--agent <name>] [--project]")
+    if not specs:
+        if project:
+            specs = ["agents"]
+        else:
+            return list_dir(skills_dir())
+    registry = load_registry()
+    table = agent_table(registry)
+    agents = []
+    for spec in specs:
+        agents.extend(resolve_agent_spec(spec, table))
+    for agent in dict.fromkeys(agents):
+        for base in agent_dirs(agent, table, project):
+            if is_conventions_agent(agent, table):
+                dest = base / CONVENTIONS
+                print("%s: %s" % (agent, "installed" if dest.is_file() else "not installed"))
+                continue
+            print("# %s (%s)" % (agent, base))
+            list_dir(base)
+    return 0
+
+
+def list_dir(base: Path) -> int:
+    if not base.is_dir():
         print("nothing installed yet. Run `newr search`, then `newr install <package>`.")
         return 0
     found = False
-    for child in sorted(skills_dir().iterdir()):
+    for child in sorted(base.iterdir()):
         if not child.is_dir():
             continue
-        receipt = installed_receipt(child.name)
+        receipt = receipt_at(child)
         if receipt:
-            print("%-20s %-8s %s" % (receipt["name"], receipt["version"], child))
+            print("%-24s %-8s %s" % (receipt["name"], receipt["version"], child))
             found = True
     if not found:
         print("nothing installed yet. Run `newr search`, then `newr install <package>`.")
@@ -279,22 +595,61 @@ def cmd_list(args: list) -> int:
 def cmd_update(args: list) -> int:
     registry = load_registry(refresh=True)
     print("registry %s" % registry.get("version", "?"))
-    wanted = []
-    for child in sorted(skills_dir().iterdir()) if skills_dir().is_dir() else []:
-        if not child.is_dir():
+    table = agent_table(registry)
+    # Every managed skill dir: the default one plus each agent's user
+    # dirs (deduped). Project dirs are inside repos, so they are
+    # updated by re-running install --project, not here.
+    dirs: list = [(None, skills_dir())]
+    for name in table:
+        if is_conventions_agent(name, table):
             continue
-        receipt = installed_receipt(child.name)
-        if not receipt:
+        for base in agent_dirs(name, table, project=False):
+            if (name, base) not in dirs:
+                dirs.append((name, base))
+    wanted: list = []
+    for agent, base in dirs:
+        if not base.is_dir():
             continue
-        pkg = packages(registry).get(child.name)
-        if pkg and pkg["version"] != receipt.get("version"):
-            wanted.append(pkg)
+        for child in sorted(base.iterdir()):
+            if not child.is_dir():
+                continue
+            receipt = receipt_at(child)
+            if not receipt:
+                continue
+            pkg = packages(registry).get(child.name)
+            if pkg and pkg["version"] != receipt.get("version"):
+                wanted.append((agent, pkg))
     if not wanted:
         print("everything is up to date")
         return 0
     source_root = package_source(registry)
-    for pkg in wanted:
-        print(install_one(pkg, source_root, None, force=True))
+    for agent, pkg in wanted:
+        if agent is None:
+            print(install_one(pkg, source_root, None, force=True))
+        else:
+            for base in agent_dirs(agent, table, project=False):
+                dest = base / pkg["name"]
+                if receipt_at(dest) and receipt_at(dest).get("version") != pkg["version"]:
+                    print(install_one(pkg, source_root, dest, force=True, agent=agent))
+    return 0
+
+
+def cmd_agents(args: list) -> int:
+    registry = load_registry()
+    table = agent_table(registry)
+    detected = set(detect_agents(table))
+    print("%-14s %-8s %-28s %s" % ("agent", "detected", "user skill dir", "project skill dir"))
+    for name, entry in table.items():
+        user = ", ".join(entry.get("user", []))
+        project = ", ".join(entry.get("project", []))
+        mark = "yes" if name in detected else "no"
+        print("%-14s %-8s %-28s %s" % (name, mark, user, project))
+    print()
+    print("Install examples:")
+    print("  newr install --agent claude-code all")
+    print("  newr install --agent auto all        (only the agents detected above)")
+    print("  newr install --agent copilot --project testing")
+    print("Aider has no skill system; --agent aider installs CONVENTIONS.md instead.")
     return 0
 
 
@@ -309,10 +664,13 @@ Usage: newr <command> [args]
 
   search [query]    list installable packages (skills and templates)
   info <package>    show a package's details and install state
-  install <pkg>...  install packages; `all` installs the six skills
-                    options: --target <dir>, --force
-  uninstall <pkg>.. remove installed skills
-  list              show installed skills
+  install <pkg>...  install packages; `all` installs the seven skills
+                    options: --target <dir>, --force,
+                             --agent <name>[,<name>...] | --agent all | --agent auto,
+                             --project (install into the project, not $HOME)
+  uninstall <pkg>.. remove installed skills (also: --agent <name> [--project])
+  list [--agent ..] show installed skills (default dir, or an agent's dir)
+  agents            list supported agents, their skill dirs, and detection
   update            refresh the registry and update installed skills
   version           print the newr version
   help [command]    show this help, or help for one command
@@ -320,6 +678,10 @@ Usage: newr <command> [args]
 Skills install to ~/.newr/skills/<name> (NEWR_HOME overrides the
 prefix). Templates install into the current directory. No account,
 no token, no build step.
+
+Agents: claude-code, codex, cursor, windsurf, copilot, gemini,
+opencode, kilo, cline, zed, agents (shared ~/.agents/skills),
+aider (CONVENTIONS.md digest; Aider has no skill system).
 """
 
 
@@ -334,6 +696,7 @@ COMMANDS = {
     "install": cmd_install,
     "uninstall": cmd_uninstall,
     "list": cmd_list,
+    "agents": cmd_agents,
     "update": cmd_update,
     "version": cmd_version,
     "help": cmd_help,
