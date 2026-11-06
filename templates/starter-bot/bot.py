@@ -1,7 +1,7 @@
 """Minimal working discord.py starter bot.
 
-Slash commands only: /ping and /balance, backed by a small SQLite
-economy (see db.py). Run the tests with: python -m pytest -q
+Slash commands only: /ping, /balance, and /leaderboard, backed by a
+small SQLite economy (see db.py). Run the tests with: python -m pytest -q
 """
 
 import asyncio
@@ -32,6 +32,7 @@ class Bot(commands.Bot):
         self.db = await db_module.connect(config.DATABASE_PATH)
         await db_module.init_db(self.db)
         await self.load_extension("cogs.general")
+        await self.load_extension("cogs.leaderboard")
         log.info("Cogs loaded.")
 
         if config.TEST_GUILD_ID:
