@@ -32,7 +32,7 @@ from pathlib import Path
 VERSION = "0.2.0"
 REPO = "drewdestar/discord-py-skills"
 REGISTRY_URL = "https://raw.githubusercontent.com/" + REPO + "/main/registry.json"
-TARBALL_URL = "https://codeload.github.com/" + REPO + "/tarball/refs/heads/main"
+TARBALL_URL = "https://codeload.github.com/" + REPO + "/tar.gz/refs/heads/main"
 RECEIPT = ".newr.json"
 
 
