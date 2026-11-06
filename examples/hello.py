@@ -45,7 +45,7 @@ async def cmd_ping(interaction: discord.Interaction) -> None:
 
 @bot.tree.command(name="greet", description="Greet someone in this server")
 async def cmd_greet(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(f"Hello {interaction.user.mention}, welcome to {interaction.guild.name if interaction.guild else "DM"}!", ephemeral=True)
+    await interaction.response.send_message(f"Hello {interaction.user.mention}, welcome to {interaction.guild.name if interaction.guild else 'DM'}!", ephemeral=True)
 
 
 @bot.tree.error
