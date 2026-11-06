@@ -30,3 +30,5 @@ website/.vitepress/cache/
 docs/skills/
 docs/public/
 docs/router.md
+
+build/
