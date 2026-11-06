@@ -37,6 +37,7 @@ skills install to `~/.newr/skills/` as before.
 | Cursor | `~/.cursor/skills/` | `.cursor/skills/` | auto, or `/skill-name` |
 | Windsurf / Devin Local | `~/.config/devin/skills/` | `.devin/skills/` | auto, or `/skill-name` |
 | GitHub Copilot | `~/.copilot/skills/` | `.github/skills/` | auto, or `/skill-name` |
+| VS Code (Copilot agent mode) | `~/.config/github-copilot/skills/` | `.github/skills/` | agent mode; paid Copilot subscription required |
 | Gemini CLI | `~/.gemini/skills/` | `.gemini/skills/` | auto (asks before activating), or `/skills` |
 | OpenCode | `~/.config/opencode/skills/` | `.opencode/skills/` | `skill` tool, or `@skill-name` |
 | Kilo Code | `~/.agents/skills/` | `.kilocode/skills/` | auto by description |
@@ -65,6 +66,8 @@ skills install to `~/.newr/skills/` as before.
 | Pi | `~/.pi/agent/skills/` | `.pi/skills/` | auto by description |
 | Shared dir | `~/.agents/skills/` | `.agents/skills/` | read by Codex, Cursor, Gemini, OpenCode, Kilo, Zed, Windsurf, Qwen, Kimi, Junie, Roo, Muse Code, Grok, Tabnine, Amp, Mistral Vibe, Trae, Crush, Goose, Augment, Antigravity, DeepSeek Harness, OpenClaw, Pi, Devin |
 | Aider | `~/.newr/aider/CONVENTIONS.md` | `./CONVENTIONS.md` | `read:` in `.aider.conf.yml` (see below) |
+
+VS Code reads Agent Skills through GitHub Copilot's agent mode (VS Code 1.108+, April 2026). Agent mode is a paid Copilot feature: the free tier cannot load skills, so `newr install --agent vscode all` installs the files but VS Code Free will not use them. Global skills live in `~/.config/github-copilot/skills/` on macOS/Linux and `%APPDATA%\github-copilot\skills\` on Windows; project skills live in `.github/skills/`, shared with the Copilot CLI entry above.
 
 ## Notes and conflicts
 
@@ -164,7 +167,7 @@ invent a directory for them.
 
 Aider has no skill system and does not read `SKILL.md`. `newr
 install --agent aider` installs a condensed digest,
-`CONVENTIONS.md`, built from all seven skills. Wire it in:
+`CONVENTIONS.md`, built from all twelve skills. Wire it in:
 
 ```yaml
 # .aider.conf.yml

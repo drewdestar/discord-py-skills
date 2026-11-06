@@ -49,28 +49,68 @@ event member_join:
   spaces.
 - Exactly one `bot` block, and it comes first. Its name is a
   quoted string, 1-32 characters.
-- `command <name>:` where `<name>` is lowercase letters, digits,
-  and underscores, starting with a letter (Discord slash command
-  names have the same rule). Command names must be unique.
+- `command <name>:` where `<name>` follows Discord's slash
+  command rule: 1-32 characters, lowercase letters, digits, `_`
+  and `-`, in any script — Japanese, Thai, Hindi, and Arabic
+  names are all valid, and a name may start with a digit or a
+  hyphen. If a letter has a lowercase form, use it (`Ping` is
+  invalid). Command names must be unique, and two names that
+  differ only by `-` vs `_` (`foo-bar` vs `foo_bar`) are
+  rejected, because both would generate the same `cmd_foo_bar`
+  function.
 - `event <kind>:` where `<kind>` is `ready` or `member_join`.
   Only those two events exist in this version.
 - Inside a block, one `key: value` per line. Values are
   double-quoted strings on one line; `\"`, `\\`, and `\n` are
   escapes. Tabs are not allowed anywhere.
 - Unknown blocks, unknown keys, and unknown event kinds are
-  errors, reported with the file and line number. `newr` never
-  silently ignores a line it does not understand.
+  errors, reported with the file and line number. When the typo
+  is close to a real name the error suggests it (`did you mean
+  'ephemeral'?`), and `newr build` prints the offending source
+  line under the error. `newr` never silently ignores a line it
+  does not understand.
+- A key may appear only once in a block, and an event kind only
+  once in a file. A second `reply:` or a second `event ready:`
+  is an error, not a silent overwrite.
+- Command descriptions are at most 100 characters and replies
+  at most 2000 characters, because Discord rejects longer ones
+  at sync/send time. Placeholders count at their longest
+  possible expansion (`{user}` and `{channel}` as 22 characters,
+  `{guild}` as 100), so a build that passes never fails at send
+  time. Bots always get the 2000-character limit; Nitro's 4000
+  does not apply to them.
+
+### Any language, any line ending, any OS
+
+- Replies, descriptions, and the bot name may be in any language:
+  Indonesian, Japanese, Arabic, Thai, emoji — `.newr` is UTF-8
+  text throughout and the generated bot is a normal Python 3
+  file, so non-ASCII strings just work. Command names follow
+  Discord's rule above, which already allows any script's
+  letters (source: https://docs.discord.com/developers/interactions/application-commands).
+- A `.newr` file saved with Windows CRLF line endings builds
+  exactly like one with LF endings (verified by test).
+- The `newr` CLI is stdlib-only Python and uses `pathlib`
+  throughout, so `python newr build bot.newr` is expected to work
+  on Windows and macOS the same way it works on Linux — but that
+  has NOT been verified by running it there. What is known:
+  there is no Windows launcher yet (no `.bat` / `.cmd` / `.ps1`;
+  `install.sh` is POSIX shell), and the `npx` install currently
+  excludes Windows (`"os"` in `package.json`). Until those land,
+  Windows users run `newr` through Python directly. The CLI's
+  own error messages are English-only; localizing them is future
+  work, not part of this version.
 
 ### Keys
 
 | Block | Key | Required | What it means |
 |---|---|---|---|
 | `bot` | `description` | no | Shown in the generated file header |
-| `command` | `description` | no | The slash command description (defaults to the command name) |
-| `command` | `reply` | yes | What the bot answers when the command runs |
+| `command` | `description` | no | The slash command description (defaults to the command name). Max 100 characters. |
+| `command` | `reply` | yes | What the bot answers when the command runs. Max 2000 characters, counting placeholders at their longest expansion. |
 | `command` | `ephemeral` | no | `true` or `false`; when true only the caller sees the reply (default `false`) |
 | `event ready` | `log` | yes | One line written to the log when the bot connects |
-| `event member_join` | `reply` | yes | Sent to the guild's system channel when a member joins (skipped silently when the guild has no system channel) |
+| `event member_join` | `reply` | yes | Sent to the guild's system channel when a member joins (skipped silently when the guild has no system channel). Max 2000 characters, same counting. |
 
 ### Placeholders
 

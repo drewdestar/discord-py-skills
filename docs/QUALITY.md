@@ -7,6 +7,19 @@ https://github.com/miqdadbadjuber/anti-slop). Antislop was written
 for UI; these are the rules that transfer to bot code. They are not
 a badge. Each skill enforces them in its own Quality bar section.
 
+The full distilled filter lives in `skills/antislop/SKILL.md`: the
+transfer table (which upstream rules apply to bot replies, embeds,
+and code, and which do not), the copywriting patterns including the
+three added in upstream v3.2.26 (temporal runway cliches, theatrical
+takeaways, title case in list elements), rhythm rules for replies,
+and a Bot Reply Gate. The mechanical part is runnable:
+`scripts/check_antislop.py` scans reply drafts, docs, and source
+for the detectable tells (em dash, buzzwords, the v3.2.26 patterns,
+title-case lists, fake-stat shapes, all-caps, comment banners);
+`tests/test_antislop.py` proves it. The checker catches mechanical
+tells only. It never judges purpose, substance, or whether a number
+is real, and it never answers "was this written by AI".
+
 ## Hard rules (never break)
 
 - **No em dash.** Never use an em dash in any message, embed, or
