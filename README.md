@@ -1,14 +1,36 @@
+<p align="center">
+  <a href="assets/banner.png"><img src="assets/banner.png" alt="discord-py-skills" width="100%" /></a>
+</p>
+
+<div align="center">
+
+[![version](https://img.shields.io/badge/version-0.4.0-5865F2?style=flat-square)](https://github.com/drewdestar/discord-py-skills)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![discord.py](https://img.shields.io/badge/discord.py-2.x-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
+[![MIT license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+
 # discord-py-skills
 
-Agent skills and a production starter kit for building Discord bots with
-discord.py. Each skill teaches an AI coding agent one job, with the
-patterns that keep a real bot running: correct intents, slash commands
-that answer errors, a SQLite economy that cannot create money, honest
-i18n, and deploys that restart themselves. Current release: v0.3.0.
+### Agent skills and a production starter kit for building Discord bots with discord.py.
 
-Works with Claude Code, Codex, Cursor, Windsurf, GitHub Copilot,
-Gemini CLI, OpenCode, Kilo Code, Cline, Zed, and Aider. See
-[docs/AGENTS.md](docs/AGENTS.md) for every install directory.
+**Seven skills, one router, one installer.** The router reads the job,
+loads the one skill the job needs, and each skill teaches one job:
+scaffolding, slash commands, a SQLite economy that cannot create
+money, honest i18n, deploys that restart themselves, and tests that
+can fail.
+
+`newr install all`
+
+[Before and after](#before--after) · [Install](#install-with-newr-like-homebrew) · [Skills](#skills) · [newr language](#write-a-bot-in-the-newr-language)
+
+</div>
+
+Works with 31 AI coding agents, from Claude Code and Codex to
+Qwen Code, Kimi Code, Kiro, JetBrains Junie, Muse Code, and Grok
+Build, plus Aider via a `CONVENTIONS.md` digest. See
+[docs/AGENTS.md](docs/AGENTS.md) for the full list, including the
+agents with no skill system (Meta AI, DeepSeek chat, Qwen chat,
+Google Jules) that this pack honestly cannot install into.
 
 ## Install with newr (like Homebrew)
 
@@ -22,6 +44,13 @@ newr install slash-commands
 newr install all               # all seven skills
 newr install starter-bot       # runnable starter bot into ./starter-bot
 ```
+
+<p align="center">
+  <a href="assets/terminal-install.png"><img src="assets/terminal-install.png" alt="Terminal output of newr install all: all seven skills installed" width="100%" /></a>
+</p>
+
+Real output of `newr install all` (v0.4.0). Skills install to
+`~/.newr/skills/<name>`; `NEWR_HOME` overrides the prefix.
 
 | Command | What it does |
 |---|---|
@@ -109,6 +138,66 @@ job: `using-discord-py-skills` routes the work first,
 | `deploy-and-monitor` | systemd service, watchdog restarts, log rotation, health checks, safe restarts | "keep my bot online", "my bot keeps dying" |
 | `testing` | Unit tests for logic, mocked interactions for commands, async tests with pytest-asyncio | "write tests", "the test passes but the bot is broken" |
 
+## How the router works
+
+`using-discord-py-skills` does no bot work itself. It reads the job,
+loads the one skill the job needs, and for a new bot it runs them in
+this order:
+
+<p align="center">
+  <a href="assets/routing.png"><img src="assets/routing.png" alt="Router order: using-discord-py-skills, then build-discord-bot, slash-commands, economy-database, i18n, testing, deploy-and-monitor" width="100%" /></a>
+</p>
+
+Skip steps that do not apply. Do not add an economy to a bot that has
+no currency, and do not add i18n to a bot with one language.
+Full route table: `skills/using-discord-py-skills/SKILL.md`.
+
+## Write a bot in the newr language
+
+`newr` has its own small language for defining a bot. A `.newr`
+file is not a general-purpose programming language: it describes a
+bot (its name, its slash commands, and two simple events), and
+`newr build` compiles it into a runnable discord.py bot. Full
+syntax in [docs/NEWR-LANG.md](docs/NEWR-LANG.md).
+
+```newr
+bot "HelloBot":
+  description: "A friendly bot that answers in plain words"
+
+command ping:
+  description: "Answer with pong"
+  reply: "Pong! Hello {user}"
+
+command greet:
+  description: "Greet someone in this server"
+  reply: "Hello {user}, welcome to {guild}!"
+  ephemeral: true
+
+event ready:
+  log: "{bot} is online"
+
+event member_join:
+  reply: "Welcome to {guild}, {user}!"
+```
+
+```bash
+newr build hello.newr            # writes hello.py next to it
+newr build hello.newr -o bot.py  # writes bot.py instead
+newr build --check hello.newr    # parse and compile, write nothing
+DISCORD_TOKEN=... python hello.py
+```
+
+The generated bot follows the same rules as the starter bot:
+slash commands on the tree synced in `setup_hook`, intents
+derived from the source (members intent only when a
+`member_join` event exists), the token from `DISCORD_TOKEN` only,
+and command errors answered instead of failing silently. A
+working example is in [examples/hello.newr](examples/hello.newr)
+with its generated output in
+[examples/hello.py](examples/hello.py). If the bot needs logic
+the language cannot say (economy, arguments, buttons), write
+Python with the skills instead.
+
 ## Quality bar
 
 Every skill enforces the same bar, written up in
@@ -119,25 +208,18 @@ live in Discord. A green test suite is not proof the bot answers.
 
 ## Before / after
 
-Without the skills, an agent writes a bot like this:
+The same bot, written twice: once the way an agent writes it with no
+guidance, once the way the skills write it.
 
-```python
-# One file, blocking calls, token in source, silent failures.
-import discord, time, sqlite3
-TOKEN = "paste-your-token-here"  # do not do this
+| **Before: one file, token in source, no commit** | **After: cogs, env token, atomic ledger** |
+|:--|:--|
+| <a href="assets/compare-before.png"><img src="assets/compare-before.png" alt="Before: one file, token in source, time.sleep(2) blocking, f-string SQL, no commit, no ledger row" width="100%"></a> | <a href="assets/compare-after.png"><img src="assets/compare-after.png" alt="After: token from the environment, cogs loaded in setup_hook, balance change and ledger row in one atomic transaction" width="100%"></a> |
+| One file, blocking calls, token in source, silent failures. The gold is gone on restart. | Cogs in `setup_hook`, token from the environment, every balance change in a ledger inside one atomic transaction. See `templates/starter-bot/` for the runnable version. |
 
-@bot.event
-async def on_message(message):
-    time.sleep(2)  # freezes every command for every user
-    db = sqlite3.connect("bot.db")
-    db.execute(f"UPDATE users SET balance = balance + 10 WHERE id = {message.author.id}")
-    # No commit, no ledger row, no error handling. The gold is gone on restart.
-```
-
-With the skills, the same bot loads cogs in `setup_hook`, reads the token
-from the environment, answers every error, and records every balance
-change in a ledger inside one atomic transaction. See
-`templates/starter-bot/` for a runnable version of the good pattern.
+Every image here opens full size if you click it. The before code is
+the block this section used to show, verbatim. The after code is
+trimmed from the real starter bot (`config.py`, `bot.py`, `db.py`):
+long SQL strings are elided with `...` inside the string literal.
 
 ## Starter bot
 
@@ -181,6 +263,10 @@ their own implementations.
   discord.py release, open an issue with the version number.
 - Nothing here needs a paid service. SQLite, systemd, and the skills
   themselves are free.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=drewdestar/discord-py-skills&type=Date)](https://star-history.com/#drewdestar/discord-py-skills&Date)
 
 ## Contributing
 

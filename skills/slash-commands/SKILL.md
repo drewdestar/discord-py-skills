@@ -4,7 +4,7 @@ description: "Add slash commands to a discord.py bot: app_commands, groups, chec
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, no paid services"
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
   author: "drewdestar"
 ---
 

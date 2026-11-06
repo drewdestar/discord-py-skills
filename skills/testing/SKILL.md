@@ -4,7 +4,7 @@ description: "Test a discord.py bot: unit tests for pure logic, mocked interacti
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, no paid services"
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
   author: "drewdestar"
 ---
 

@@ -9,6 +9,7 @@ next to registry.json), so no network is needed. HOME is also
 pointed at the temp dir, so agent skill directories land there.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -16,10 +17,19 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NEWR = REPO_ROOT / "newr"
+
+
+def _load_newr_module():
+    spec = importlib.util.spec_from_file_location(
+        "newr_lib", NEWR, loader=SourceFileLoader("newr_lib", str(NEWR)))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 SKILLS = ("using-discord-py-skills", "build-discord-bot", "slash-commands",
           "economy-database", "i18n", "deploy-and-monitor", "testing")
 SPEC_FRONTMATTER_FIELDS = {"name", "description", "license",
@@ -50,7 +60,7 @@ class NewrTest(unittest.TestCase):
         return proc
 
     def test_version_and_help(self):
-        self.assertIn("newr 0.3.0", self.newr("version").stdout)
+        self.assertIn("newr 0.4.0", self.newr("version").stdout)
         self.assertIn("install", self.newr("help").stdout)
         self.assertIn("--agent", self.newr("help").stdout)
         self.assertEqual(self.newr("bogus-command").returncode, 2)
@@ -77,7 +87,7 @@ class NewrTest(unittest.TestCase):
         self.assertTrue((dest / "SKILL.md").is_file())
         receipt = json.loads((dest / ".newr.json").read_text())
         self.assertEqual(receipt["name"], "slash-commands")
-        self.assertEqual(receipt["version"], "0.3.0")
+        self.assertEqual(receipt["version"], "0.4.0")
         # Byte-identical to the source skill.
         self.assertEqual(
             (dest / "SKILL.md").read_bytes(),
@@ -126,7 +136,7 @@ class NewrTest(unittest.TestCase):
         (dest / ".newr.json").write_text(json.dumps(receipt))
         proc = self.newr("update")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("installed i18n 0.3.0", proc.stdout)
+        self.assertIn("installed i18n 0.4.0", proc.stdout)
         self.assertIn("everything is up to date", self.newr("update").stdout)
 
     def test_install_unknown_package_fails_cleanly(self):
@@ -139,8 +149,20 @@ class NewrTest(unittest.TestCase):
     def test_agents_lists_supported_agents(self):
         out = self.newr("agents").stdout
         for name in ("claude-code", "codex", "cursor", "windsurf", "copilot",
-                     "gemini", "opencode", "kilo", "cline", "zed", "agents", "aider"):
+                     "gemini", "opencode", "kilo", "cline", "zed", "agents", "aider",
+                     "qwen", "kimi", "kiro", "junie", "roo", "continue", "muse",
+                     "grok", "tabnine", "amp", "vibe", "trae", "crush", "goose",
+                     "factory", "augment", "antigravity", "zcode", "deepseek",
+                     "openclaw", "pi"):
             self.assertIn(name, out)
+
+    def test_registry_agents_match_builtin(self):
+        # The registry wins when present, so it must carry exactly
+        # the same agent table as the built-in fallback. If they
+        # drift, one of them ships the wrong install directories.
+        newr_mod = _load_newr_module()
+        registry = json.loads((REPO_ROOT / "registry.json").read_text())
+        self.assertEqual(registry["agents"], newr_mod.BUILTIN_AGENTS)
 
     def test_install_agent_claude_code(self):
         proc = self.newr("install", "--agent", "claude-code", "testing")
@@ -148,7 +170,7 @@ class NewrTest(unittest.TestCase):
         dest = self.home / ".claude" / "skills" / "testing"
         self.assertTrue((dest / "SKILL.md").is_file())
         receipt = json.loads((dest / ".newr.json").read_text())
-        self.assertEqual(receipt["version"], "0.3.0")
+        self.assertEqual(receipt["version"], "0.4.0")
         self.assertEqual(receipt["agent"], "claude-code")
         # The default dir is untouched by an agent install.
         self.assertFalse((self.home / "skills" / "testing").exists())
@@ -166,11 +188,41 @@ class NewrTest(unittest.TestCase):
             self.home / ".gemini" / "skills" / "i18n",
             self.home / ".config" / "opencode" / "skills" / "i18n",
             self.home / ".cline" / "skills" / "i18n",
+            self.home / ".qwen" / "skills" / "i18n",
+            self.home / ".kimi-code" / "skills" / "i18n",
+            self.home / ".kiro" / "skills" / "i18n",
+            self.home / ".junie" / "skills" / "i18n",
+            self.home / ".roo" / "skills" / "i18n",
+            self.home / ".continue" / "skills" / "i18n",
+            self.home / ".config" / "muse" / "skills" / "i18n",
+            self.home / ".grok" / "skills" / "i18n",
+            self.home / ".tabnine" / "agent" / "skills" / "i18n",
+            self.home / ".config" / "agents" / "skills" / "i18n",
+            self.home / ".vibe" / "skills" / "i18n",
+            self.home / ".trae" / "skills" / "i18n",
+            self.home / ".config" / "crush" / "skills" / "i18n",
+            self.home / ".config" / "goose" / "skills" / "i18n",
+            self.home / ".factory" / "skills" / "i18n",
+            self.home / ".augment" / "skills" / "i18n",
+            self.home / ".gemini" / "config" / "skills" / "i18n",
+            self.home / ".gemini" / "antigravity-cli" / "skills" / "i18n",
+            self.home / ".zcode" / "skills" / "i18n",
+            self.home / ".dsh" / "skills" / "i18n",
+            self.home / ".openclaw" / "skills" / "i18n",
+            self.home / ".pi" / "agent" / "skills" / "i18n",
         ]
         for dest in expected:
             self.assertTrue((dest / "SKILL.md").is_file(), str(dest))
         # `all` excludes aider: no conventions file is written.
         self.assertFalse((self.home / ".newr" / "aider" / "CONVENTIONS.md").exists())
+
+    def test_install_agent_qwen(self):
+        proc = self.newr("install", "--agent", "qwen", "testing")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        dest = self.home / ".qwen" / "skills" / "testing"
+        self.assertTrue((dest / "SKILL.md").is_file())
+        receipt = json.loads((dest / ".newr.json").read_text())
+        self.assertEqual(receipt["agent"], "qwen")
 
     def test_install_agent_auto_detects_markers(self):
         # Fake installed agents with marker dirs. PATH is emptied so
@@ -252,7 +304,7 @@ class NewrTest(unittest.TestCase):
         (dest / ".newr.json").write_text(json.dumps(receipt))
         proc = self.newr("update")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("installed i18n 0.3.0", proc.stdout)
+        self.assertIn("installed i18n 0.4.0", proc.stdout)
 
     def test_info_shows_agent_installs(self):
         self.newr("install", "--agent", "opencode", "testing")
@@ -282,7 +334,7 @@ class NewrTest(unittest.TestCase):
             self.assertLessEqual(len(desc), 1024, name)
             self.assertTrue(set(fields) <= SPEC_FRONTMATTER_FIELDS, name)
             self.assertEqual(fields.get("license"), "MIT", name)
-            self.assertIn("0.3.0", (skill / "SKILL.md").read_text(), name)
+            self.assertIn("0.4.0", (skill / "SKILL.md").read_text(), name)
 
     def test_skill_script_copies_match_root(self):
         pairs = [
@@ -300,7 +352,7 @@ class NewrTest(unittest.TestCase):
 
     def test_package_json_for_npx(self):
         pkg = json.loads((REPO_ROOT / "package.json").read_text())
-        self.assertEqual(pkg["version"], "0.3.0")
+        self.assertEqual(pkg["version"], "0.4.0")
         self.assertEqual(pkg["bin"], {"newr": "./newr"})
         self.assertIn("newr", pkg["files"])
         self.assertIn("skills/", pkg["files"])

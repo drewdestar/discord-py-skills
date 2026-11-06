@@ -33,11 +33,12 @@ system, so --agent aider installs a CONVENTIONS.md digest instead.
 
 Everything is fetched from the public repo at
 https://github.com/drewdestar/discord-py-skills; no account, no token,
-no build step. Python 3.9+ and the standard library only.
+no build step. Python 3.10+ and the standard library only.
 """
 
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -46,7 +47,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 REPO = "drewdestar/discord-py-skills"
 REGISTRY_URL = "https://raw.githubusercontent.com/" + REPO + "/main/registry.json"
 TARBALL_URL = "https://codeload.github.com/" + REPO + "/tar.gz/refs/heads/main"
@@ -123,8 +124,134 @@ BUILTIN_AGENTS = {
         "project": [".agents/skills"],
         "detect": ["~/.config/zed", "zed"],
     },
+    "amp": {
+        "description": "Amp",
+        "user": ["~/.config/agents/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.config/agents", "amp"],
+    },
+    "antigravity": {
+        "description": "Google Antigravity",
+        "user": ["~/.gemini/config/skills", "~/.gemini/antigravity-cli/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.gemini/antigravity-cli", "agy"],
+    },
+    "augment": {
+        "description": "Augment Code (Auggie)",
+        "user": ["~/.augment/skills"],
+        "project": [".augment/skills"],
+        "detect": ["~/.augment", "auggie"],
+    },
+    "continue": {
+        "description": "Continue.dev (cn CLI; the IDE extension has no skill drop-in)",
+        "user": ["~/.continue/skills"],
+        "project": [".continue/skills"],
+        "detect": ["~/.continue", "cn"],
+    },
+    "crush": {
+        "description": "Crush",
+        "user": ["~/.config/crush/skills"],
+        "project": [".crush/skills"],
+        "detect": ["~/.config/crush", "crush"],
+    },
+    "deepseek": {
+        "description": "DeepSeek Harness",
+        "user": ["~/.dsh/skills"],
+        "project": [".dsh/skills"],
+        "detect": ["~/.dsh", "dsh"],
+    },
+    "factory": {
+        "description": "Factory Droid",
+        "user": ["~/.factory/skills"],
+        "project": [".factory/skills"],
+        "detect": ["~/.factory", "droid"],
+    },
+    "goose": {
+        "description": "Goose",
+        "user": ["~/.config/goose/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.config/goose", "goose"],
+    },
+    "grok": {
+        "description": "Grok Build (xAI)",
+        "user": ["~/.grok/skills"],
+        "project": [".grok/skills"],
+        "detect": ["~/.grok", "grok"],
+    },
+    "junie": {
+        "description": "JetBrains Junie",
+        "user": ["~/.junie/skills"],
+        "project": [".junie/skills"],
+        "detect": ["~/.junie", "junie"],
+    },
+    "kimi": {
+        "description": "Kimi Code",
+        "user": ["~/.kimi-code/skills"],
+        "project": [".kimi-code/skills"],
+        "detect": ["~/.kimi-code", "kimi"],
+    },
+    "kiro": {
+        "description": "Kiro",
+        "user": ["~/.kiro/skills"],
+        "project": [".kiro/skills"],
+        "detect": ["~/.kiro", "kiro-cli"],
+    },
+    "muse": {
+        "description": "Muse Code (Meta)",
+        "user": ["~/.config/muse/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.config/muse", "muse"],
+    },
+    "openclaw": {
+        "description": "OpenClaw",
+        "user": ["~/.openclaw/skills"],
+        "project": [".agents/skills"],
+        "detect": ["~/.openclaw", "openclaw"],
+    },
+    "pi": {
+        "description": "Pi",
+        "user": ["~/.pi/agent/skills"],
+        "project": [".pi/skills"],
+        "detect": ["~/.pi", "pi"],
+    },
+    "qwen": {
+        "description": "Qwen Code",
+        "user": ["~/.qwen/skills"],
+        "project": [".qwen/skills"],
+        "detect": ["~/.qwen", "qwen"],
+    },
+    "roo": {
+        "description": "Roo Code (shut down 2026-05-15; docs and extension still work, unmaintained)",
+        "user": ["~/.roo/skills"],
+        "project": [".roo/skills"],
+        "detect": ["~/.roo"],
+    },
+    "tabnine": {
+        "description": "Tabnine CLI",
+        "user": ["~/.tabnine/agent/skills"],
+        "project": [".tabnine/agent/skills"],
+        "detect": ["~/.tabnine"],
+    },
+    "trae": {
+        "description": "Trae",
+        "user": ["~/.trae/skills"],
+        "project": [".trae/skills"],
+        "detect": ["~/.trae", "traecli"],
+    },
+    "vibe": {
+        "description": "Mistral Vibe",
+        "user": ["~/.vibe/skills"],
+        "project": [".vibe/skills"],
+        "detect": ["~/.vibe", "vibe"],
+    },
+    "zcode": {
+        "description": "ZCode (Z.ai)",
+        "user": ["~/.zcode/skills"],
+        "project": [".zcode/skills"],
+        "detect": ["~/.zcode"],
+    },
     "agents": {
-        "description": "Shared .agents/skills dir (Codex, Cursor, Gemini, OpenCode, Kilo, Zed, Windsurf)",
+        "description": "Shared .agents/skills dir (read by 20+ agents, including Codex, Cursor, Gemini, OpenCode, Kilo, Zed, Windsurf)",
         "user": ["~/.agents/skills"],
         "project": [".agents/skills"],
         "detect": [],
@@ -148,6 +275,381 @@ AGENT_ALIASES = {
 
 class NewrError(Exception):
     """A user-facing failure: print the message, exit 1."""
+
+
+class NewrLangError(NewrError):
+    """A .newr source error. The message already carries "line N"."""
+
+    def __init__(self, line: int, message: str):
+        super().__init__("line %d: %s" % (line, message))
+        self.line = line
+
+
+# --- the .newr language ---
+# A tiny line-based language for defining a Discord bot. Full syntax
+# in docs/NEWR-LANG.md. It lives in this file on purpose: newr is
+# one file, so `curl | sh` installs and `npx github:` keep working
+# with no extra module to fetch.
+
+_NEWR_COMMAND_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_NEWR_BLOCK_OPEN = re.compile(r"^(bot|command|event)\s+(.+):$")
+_NEWR_KEY_VALUE = re.compile(r"^([a-z_]+):\s*(.*)$")
+# Placeholders allowed in each reply/log context. A reply to a
+# command runs with an interaction, so it can name the user, the
+# server, and the channel. A ready log has no user or server. A
+# member-join reply runs with a member, so it can name the user and
+# the server, but there is no channel in context.
+_NEWR_PLACEHOLDERS = {
+    "command": {"user", "guild", "channel"},
+    "ready": {"bot"},
+    "member_join": {"user", "guild"},
+}
+_NEWR_BOT_KEYS = {"description"}
+_NEWR_COMMAND_KEYS = {"description", "reply", "ephemeral"}
+_NEWR_EVENT_KEYS = {"ready": {"log"}, "member_join": {"reply"}}
+
+
+def _newr_unquote(value: str, line_no: int) -> str:
+    """One double-quoted string value. Escapes: \" \\ \n."""
+    if len(value) < 2 or not value.startswith('"') or not value.endswith('"'):
+        raise NewrLangError(line_no, "expected a quoted string, got %s" % value)
+    out: list = []
+    i = 1
+    while i < len(value) - 1:
+        ch = value[i]
+        if ch == "\\":
+            if i + 1 >= len(value) - 1:
+                raise NewrLangError(line_no, "dangling backslash in string")
+            nxt = value[i + 1]
+            if nxt == '"':
+                out.append('"')
+            elif nxt == "\\":
+                out.append("\\")
+            elif nxt == "n":
+                out.append("\n")
+            else:
+                raise NewrLangError(line_no, "unknown escape \\%s" % nxt)
+            i += 2
+        elif ch == '"':
+            raise NewrLangError(line_no, "unescaped quote inside string")
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _newr_check_placeholders(text: str, context: str, line_no: int) -> None:
+    """Every {name} in text must be allowed in this context."""
+    allowed = _NEWR_PLACEHOLDERS[context]
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            end = text.find("}", i)
+            if end < 0:
+                raise NewrLangError(line_no, "unclosed placeholder in %r" % text)
+            name = text[i + 1:end]
+            if name not in allowed:
+                raise NewrLangError(
+                    line_no, "unknown placeholder {%s} (allowed here: %s)"
+                    % (name, ", ".join(sorted(allowed))))
+            i = end + 1
+        elif ch == "}":
+            raise NewrLangError(line_no, "stray } in %r" % text)
+        else:
+            i += 1
+
+
+def parse_newr(text: str, source_name: str = "") -> dict:
+    """Parse .newr source into {"bot", "commands", "events"}.
+
+    Raises NewrLangError naming the line on the first problem.
+    Anything the parser does not understand is an error: it never
+    silently ignores a line."""
+    parsed: dict = {"bot": None, "commands": [], "events": []}
+    block: dict | None = None  # {"kind", "line", "data"}
+
+    def finish_block():
+        nonlocal block
+        if block is None:
+            return
+        kind = block["kind"]
+        data = block["data"]
+        if kind == "command" and data.get("reply") is None:
+            raise NewrLangError(
+                block["line"], "command %r has no reply" % data["name"])
+        if kind == "event" and data["kind"] == "ready" and data.get("log") is None:
+            raise NewrLangError(block["line"], "ready event has no log line")
+        if kind == "event" and data["kind"] == "member_join" and data.get("reply") is None:
+            raise NewrLangError(
+                block["line"], "member_join event has no reply")
+        if kind == "bot":
+            parsed["bot"] = data
+        elif kind == "command":
+            parsed["commands"].append(data)
+        else:
+            parsed["events"].append(data)
+        block = None
+
+    for line_no, raw in enumerate(text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        leading = raw[:len(raw) - len(raw.lstrip(" \t"))]
+        if "\t" in leading:
+            raise NewrLangError(line_no, "tab indentation is not allowed; use spaces")
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent not in (0, 2):
+            raise NewrLangError(
+                line_no, "expected 0 or 2 spaces of indentation, got %d" % indent)
+        if indent == 2:
+            if block is None:
+                raise NewrLangError(line_no, "indented line outside any block")
+            match = _NEWR_KEY_VALUE.match(stripped)
+            if not match:
+                raise NewrLangError(line_no, "expected `key: value`, got %r" % stripped)
+            key, value = match.group(1), match.group(2)
+            kind = block["kind"]
+            data = block["data"]
+            allowed = (_NEWR_BOT_KEYS if kind == "bot"
+                       else _NEWR_COMMAND_KEYS if kind == "command"
+                       else _NEWR_EVENT_KEYS[data["kind"]])
+            if key not in allowed:
+                raise NewrLangError(
+                    line_no, "unknown key %r in %s block" % (key, kind))
+            if key == "ephemeral":
+                if value not in ("true", "false"):
+                    raise NewrLangError(
+                        line_no, "ephemeral must be true or false, got %r" % value)
+                data["ephemeral"] = value == "true"
+            else:
+                parsed_value = _newr_unquote(value, line_no)
+                context = ("command" if kind == "command"
+                           else data["kind"] if kind == "event" else "ready")
+                if key in ("reply", "log"):
+                    _newr_check_placeholders(parsed_value, context, line_no)
+                data[key] = parsed_value
+            continue
+        # Top-level block opener.
+        match = _NEWR_BLOCK_OPEN.match(stripped)
+        if not match:
+            raise NewrLangError(line_no, "expected a block like `command ping:`, got %r"
+                                % stripped)
+        keyword, head = match.group(1), match.group(2)
+        finish_block()
+        if keyword == "bot":
+            if parsed["bot"] is not None:
+                raise NewrLangError(line_no, "duplicate bot block")
+            name = _newr_unquote(head, line_no)
+            if not 1 <= len(name) <= 32:
+                raise NewrLangError(line_no, "bot name must be 1-32 characters")
+            block = {"kind": "bot", "line": line_no,
+                     "data": {"name": name, "description": None}}
+        elif keyword == "command":
+            if parsed["bot"] is None:
+                raise NewrLangError(
+                    line_no, "no bot block yet: the bot block must come first")
+            if not _NEWR_COMMAND_NAME.match(head):
+                raise NewrLangError(
+                    line_no, "invalid command name %r (lowercase letters, digits, "
+                    "underscores, starting with a letter)" % head)
+            if any(c["name"] == head for c in parsed["commands"]):
+                raise NewrLangError(line_no, "duplicate command %r" % head)
+            block = {"kind": "command", "line": line_no,
+                     "data": {"name": head, "description": head,
+                              "reply": None, "ephemeral": False}}
+        else:  # event
+            if parsed["bot"] is None:
+                raise NewrLangError(
+                    line_no, "no bot block yet: the bot block must come first")
+            if head not in ("ready", "member_join"):
+                raise NewrLangError(line_no, "unknown event %r" % head)
+            block = {"kind": "event", "line": line_no,
+                     "data": {"kind": head}}
+    finish_block()
+    if parsed["bot"] is None:
+        raise NewrLangError(1, "no bot block: a .newr file starts with `bot \"Name\":`")
+    # Drop the None reply placeholder: a command that reaches here
+    # always has one (finish_block enforces it).
+    return parsed
+
+
+def _newr_escape_dq(text: str) -> str:
+    """Escape text for a double-quoted Python string literal."""
+    return (text.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+
+
+def _newr_dq(text: str) -> str:
+    """A plain string as a double-quoted Python literal."""
+    return '"%s"' % _newr_escape_dq(text)
+
+
+def _newr_fstring(text: str, mapping: dict) -> str:
+    """A reply/log string as a Python f-string literal. Placeholders
+    become {expression}; every other character is literal text."""
+    out: list = ['f"']
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            end = text.find("}", i)
+            out.append("{%s}" % mapping[text[i + 1:end]])
+            i = end + 1
+        else:
+            out.append(_newr_escape_dq(ch))
+            i += 1
+    out.append('"')
+    return "".join(out)
+
+
+def compile_newr(parsed: dict, source_name: str = "") -> str:
+    """Compile parsed .newr into runnable discord.py source."""
+    bot = parsed["bot"]
+    commands = parsed["commands"]
+    events = parsed["events"]
+    ready = next((e for e in events if e["kind"] == "ready"), None)
+    join = next((e for e in events if e["kind"] == "member_join"), None)
+    lines: list = []
+    add = lines.append
+    add("# Generated by newr from %s — do not edit by hand." % source_name)
+    add("# Edit the .newr file and rebuild with: newr build %s" % source_name)
+    if bot.get("description"):
+        add("# %s" % bot["description"].replace("\n", " "))
+    add("")
+    add("import logging")
+    add("import os")
+    add("")
+    add("import discord")
+    add("from discord import app_commands")
+    add("from discord.ext import commands")
+    add("")
+    add("logging.basicConfig(")
+    add('    level=logging.INFO,')
+    add('    format="%(asctime)s %(levelname)s %(name)s: %(message)s",')
+    add(")")
+    add('log = logging.getLogger("%s")' % bot["name"].lower())
+    add("")
+    add("")
+    add("class Bot(commands.Bot):")
+    add("    def __init__(self) -> None:")
+    add("        intents = discord.Intents.default()")
+    if join is not None:
+        add("        intents.members = True")
+    add('        super().__init__(command_prefix="!", intents=intents)')
+    add("")
+    add("    async def setup_hook(self) -> None:")
+    add("        await self.tree.sync()")
+    add('        log.info("Commands synced globally.")')
+    if ready is not None:
+        add("")
+        add("    async def on_ready(self) -> None:")
+        add("        log.info(%s)" % _newr_fstring(ready["log"], {"bot": "self.user"}))
+    if join is not None:
+        add("")
+        add("    async def on_member_join(self, member: discord.Member) -> None:")
+        add("        channel = member.guild.system_channel")
+        add("        if channel is not None:")
+        add("            await channel.send(%s)" % _newr_fstring(
+            join["reply"], {"user": "member.mention",
+                           "guild": "member.guild.name"}))
+    add("")
+    add("")
+    add("bot = Bot()")
+    for cmd in commands:
+        add("")
+        add("")
+        add('@bot.tree.command(name=%s, description=%s)'
+            % (_newr_dq(cmd["name"]), _newr_dq(cmd["description"])))
+        add("async def cmd_%s(interaction: discord.Interaction) -> None:" % cmd["name"])
+        mapping = {
+            "user": "interaction.user.mention",
+            "guild": 'interaction.guild.name if interaction.guild else "DM"',
+            "channel": "_channel_text(interaction.channel)",
+        }
+        call = "    await interaction.response.send_message(%s" % _newr_fstring(
+            cmd["reply"], mapping)
+        if cmd["ephemeral"]:
+            call += ", ephemeral=True"
+        add(call + ")")
+    add("")
+    add("")
+    add("@bot.tree.error")
+    add("async def on_app_command_error(interaction: discord.Interaction,")
+    add("                               error: app_commands.AppCommandError) -> None:")
+    add('    log.warning("Command failed: %s", error)')
+    add('    message = "Sorry, that command hit a problem. Try again."')
+    add("    try:")
+    add("        if interaction.response.is_done():")
+    add("            await interaction.followup.send(message, ephemeral=True)")
+    add("        else:")
+    add("            await interaction.response.send_message(message, ephemeral=True)")
+    add("    except discord.HTTPException:")
+    add('        log.warning("Could not answer the failed command.")')
+    add("")
+    add("")
+    add("def _channel_text(channel) -> str:")
+    add('    """The channel as text: its mention, its name, or ""."""')
+    add("    if channel is None:")
+    add('        return ""')
+    add('    return getattr(channel, "mention", None) or str(channel)')
+    add("")
+    add("")
+    add("def main() -> None:")
+    add('    token = os.environ.get("DISCORD_TOKEN")')
+    add("    if not token:")
+    add('        raise SystemExit("set the DISCORD_TOKEN environment variable")')
+    add("    bot.run(token)")
+    add("")
+    add("")
+    add('if __name__ == "__main__":')
+    add("    main()")
+    add("")
+    return "\n".join(lines)
+
+
+def cmd_build(args: list) -> int:
+    check = "--check" in args
+    rest = [a for a in args if a != "--check"]
+    output = None
+    files: list = []
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg in ("-o", "--output") and i + 1 < len(rest):
+            output = rest[i + 1]
+            i += 2
+        elif arg.startswith("--output="):
+            output = arg[len("--output="):]
+            i += 1
+        elif arg.startswith("-o") and len(arg) > 2:
+            output = arg[2:]
+            i += 1
+        else:
+            files.append(arg)
+            i += 1
+    if len(files) != 1:
+        raise NewrError("usage: newr build [--check] <file.newr> [-o <file.py>]")
+    src = Path(files[0])
+    if not src.is_file():
+        raise NewrError("no such file: %s" % src)
+    try:
+        text = src.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise NewrError("could not read %s as UTF-8 (%s)" % (src, exc))
+    try:
+        parsed = parse_newr(text, str(src))
+    except NewrLangError as exc:
+        raise NewrError("%s: %s" % (src, exc))
+    code = compile_newr(parsed, str(src))
+    if check:
+        print("ok: %s (%d command(s), %d event(s))"
+              % (src, len(parsed["commands"]), len(parsed["events"])))
+        return 0
+    dest = Path(output) if output else src.with_suffix(".py")
+    dest.write_text(code, encoding="utf-8")
+    print("built %s from %s" % (dest, src))
+    return 0
 
 
 def home() -> Path:
@@ -672,6 +1174,8 @@ Usage: newr <command> [args]
   list [--agent ..] show installed skills (default dir, or an agent's dir)
   agents            list supported agents, their skill dirs, and detection
   update            refresh the registry and update installed skills
+  build <file.newr> build a .newr bot into runnable discord.py
+                    options: --check, -o/--output <file.py>
   version           print the newr version
   help [command]    show this help, or help for one command
 
@@ -680,8 +1184,12 @@ prefix). Templates install into the current directory. No account,
 no token, no build step.
 
 Agents: claude-code, codex, cursor, windsurf, copilot, gemini,
-opencode, kilo, cline, zed, agents (shared ~/.agents/skills),
-aider (CONVENTIONS.md digest; Aider has no skill system).
+opencode, kilo, cline, zed, qwen, kimi, kiro, junie, roo, continue,
+muse, grok, tabnine, amp, vibe, trae, crush, goose, factory, augment,
+antigravity, zcode, deepseek, openclaw, pi, agents (shared
+~/.agents/skills, read by 20+ agents), aider (CONVENTIONS.md digest;
+Aider has no skill system). Run `newr agents` for the full list with
+skill directories and detection.
 """
 
 
@@ -698,6 +1206,7 @@ COMMANDS = {
     "list": cmd_list,
     "agents": cmd_agents,
     "update": cmd_update,
+    "build": cmd_build,
     "version": cmd_version,
     "help": cmd_help,
 }

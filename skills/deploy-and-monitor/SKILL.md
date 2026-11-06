@@ -4,7 +4,7 @@ description: "Run a discord.py bot 24/7: systemd service, watchdog restarts, log
 license: MIT
 compatibility: "discord.py 2.x, Python 3.10+, systemd, no paid services"
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
   author: "drewdestar"
 ---
 
