@@ -19,6 +19,13 @@ async def test_new_user_balance_is_zero(database):
     assert await db_module.get_balance(database, 1) == 0
 
 
+async def test_connect_creates_missing_parent_dir(tmp_path):
+    db = await db_module.connect(str(tmp_path / "data" / "bot.db"))
+    await db_module.init_db(db)
+    assert await db_module.get_balance(db, 1) == 0
+    await db.close()
+
+
 async def test_credit_once_pays_only_once(database):
     lock = asyncio.Lock()
     assert await db_module.credit_once(database, lock, 1, 100, "reward", "seed:1")
